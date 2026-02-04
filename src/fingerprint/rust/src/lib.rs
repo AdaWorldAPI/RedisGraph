@@ -47,6 +47,7 @@ pub mod representation;
 pub mod dntree;
 pub mod mindmap;
 pub mod nntree;
+pub mod epiphany;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -64,6 +65,7 @@ pub use representation::{GradedVector, StackedBinary, SparseHdr};
 pub use dntree::{TreeAddr, DnTree, DnNode, DnEdge, CogVerb, VerbCategory};
 pub use mindmap::{GrBMindmap, MindmapBuilder, MindmapNode, NodeType};
 pub use nntree::{NnTree, NnTreeConfig, SparseNnTree};
+pub use epiphany::{EpiphanyEngine, EpiphanyZone, CentroidStats, ResonanceCalibrator};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
