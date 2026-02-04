@@ -54,6 +54,7 @@ pub mod nntree;
 pub mod epiphany;
 pub mod crystal_dejavu;
 pub mod slot_encoding;
+pub mod storage_transport;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
