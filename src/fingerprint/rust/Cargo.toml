@@ -1,0 +1,58 @@
+[package]
+name = "hdr-hamming"
+version = "0.1.0"
+edition = "2021"
+description = "Bitpacked HDR Hamming distance with Arrow DataFusion storage"
+license = "AGPL-3.0"
+authors = ["RedisGraph Contributors"]
+
+[lib]
+name = "hdr_hamming"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["simd", "datafusion-storage"]
+simd = []
+datafusion-storage = ["dep:datafusion", "dep:arrow", "dep:tokio"]
+ffi = []
+
+[dependencies]
+# Arrow ecosystem for storage
+arrow = { version = "53", features = ["ffi"] }
+datafusion = { version = "43", optional = true }
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros"], optional = true }
+
+# Async runtime
+futures = "0.3"
+
+# Error handling
+thiserror = "2.0"
+
+# Parallel processing
+rayon = "1.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Logging
+log = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+tempfile = "3.14"
+
+[[bench]]
+name = "hamming_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
