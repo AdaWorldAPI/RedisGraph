@@ -53,6 +53,7 @@ pub mod mindmap;
 pub mod nntree;
 pub mod epiphany;
 pub mod crystal_dejavu;
+pub mod slot_encoding;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -76,6 +77,7 @@ pub use crystal_dejavu::{
     DejaVuRL, DejaVuObservation, SigmaBand,
     TruthMarker, SuperpositionCleaner, CrystalDejaVuTruth,
 };
+pub use slot_encoding::{SlotEncodedNode, SlotKeys, NodeBuilder, StringEncoder};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
