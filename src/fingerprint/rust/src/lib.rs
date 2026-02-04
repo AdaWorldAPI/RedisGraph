@@ -9,6 +9,10 @@
 //! - **144 Cognitive Verbs** - Go board topology for semantic relations
 //! - **GraphBLAS Mindmap** - Sparse matrix operations with tree structure
 //! - **NN-Tree** - O(log n) nearest neighbor with fingerprint clustering
+//! - **Epiphany Engine** - SD threshold + centroid radius calibration
+//! - **Sentence Crystal** - Transformer embeddings → 5D crystal → fingerprints
+//! - **Déjà Vu RL** - Multipass ±3σ overlay for reinforcement patterns
+//! - **Truth Markers** - Orthogonal superposition cleaning
 //!
 //! ## The Core Insight
 //!
@@ -48,6 +52,7 @@ pub mod dntree;
 pub mod mindmap;
 pub mod nntree;
 pub mod epiphany;
+pub mod crystal_dejavu;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -66,6 +71,11 @@ pub use dntree::{TreeAddr, DnTree, DnNode, DnEdge, CogVerb, VerbCategory};
 pub use mindmap::{GrBMindmap, MindmapBuilder, MindmapNode, NodeType};
 pub use nntree::{NnTree, NnTreeConfig, SparseNnTree};
 pub use epiphany::{EpiphanyEngine, EpiphanyZone, CentroidStats, ResonanceCalibrator};
+pub use crystal_dejavu::{
+    SentenceCrystal, Coord5D, CrystalCell,
+    DejaVuRL, DejaVuObservation, SigmaBand,
+    TruthMarker, SuperpositionCleaner, CrystalDejaVuTruth,
+};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
