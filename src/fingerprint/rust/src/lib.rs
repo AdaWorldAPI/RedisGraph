@@ -5,6 +5,10 @@
 //! - **Stacked Popcount** for hierarchical Hamming distance
 //! - **Vector Field Resonance** via bind/unbind XOR operations
 //! - **Arrow DataFusion** for columnar storage (no Parquet needed!)
+//! - **DN Tree** - 256-way hierarchical addressing (like LDAP Distinguished Names)
+//! - **144 Cognitive Verbs** - Go board topology for semantic relations
+//! - **GraphBLAS Mindmap** - Sparse matrix operations with tree structure
+//! - **NN-Tree** - O(log n) nearest neighbor with fingerprint clustering
 //!
 //! ## The Core Insight
 //!
@@ -40,6 +44,9 @@ pub mod resonance;
 pub mod hdr_cascade;
 pub mod graphblas;
 pub mod representation;
+pub mod dntree;
+pub mod mindmap;
+pub mod nntree;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -54,6 +61,9 @@ pub use resonance::{VectorField, Resonator, BoundEdge};
 pub use hdr_cascade::{HdrCascade, MexicanHat, SearchResult};
 pub use graphblas::{GrBMatrix, GrBVector, HdrSemiring, Semiring};
 pub use representation::{GradedVector, StackedBinary, SparseHdr};
+pub use dntree::{TreeAddr, DnTree, DnNode, DnEdge, CogVerb, VerbCategory};
+pub use mindmap::{GrBMindmap, MindmapBuilder, MindmapNode, NodeType};
+pub use nntree::{NnTree, NnTreeConfig, SparseNnTree};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
