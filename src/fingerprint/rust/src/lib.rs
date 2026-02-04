@@ -38,6 +38,7 @@ pub mod bitpack;
 pub mod hamming;
 pub mod resonance;
 pub mod hdr_cascade;
+pub mod graphblas;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -50,6 +51,7 @@ pub use bitpack::{BitpackedVector, VECTOR_BITS, VECTOR_WORDS};
 pub use hamming::{HammingEngine, StackedPopcount};
 pub use resonance::{VectorField, Resonator, BoundEdge};
 pub use hdr_cascade::{HdrCascade, MexicanHat, SearchResult};
+pub use graphblas::{GrBMatrix, GrBVector, HdrSemiring, Semiring};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
