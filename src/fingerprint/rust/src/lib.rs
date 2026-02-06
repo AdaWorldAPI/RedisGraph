@@ -13,6 +13,7 @@
 //! - **Sentence Crystal** - Transformer embeddings → 5D crystal → fingerprints
 //! - **Déjà Vu RL** - Multipass ±3σ overlay for reinforcement patterns
 //! - **Truth Markers** - Orthogonal superposition cleaning
+//! - **DN-Sparse** - Holy grail graph: DN-addressed O(1) nodes + delta CSR + HDR fingerprints
 //!
 //! ## The Core Insight
 //!
@@ -55,6 +56,7 @@ pub mod epiphany;
 pub mod crystal_dejavu;
 pub mod slot_encoding;
 pub mod storage_transport;
+pub mod dn_sparse;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -79,6 +81,10 @@ pub use crystal_dejavu::{
     TruthMarker, SuperpositionCleaner, CrystalDejaVuTruth,
 };
 pub use slot_encoding::{SlotEncodedNode, SlotKeys, NodeBuilder, StringEncoder};
+pub use dn_sparse::{
+    PackedDn, DnGraph, DnNodeStore, DnCsr, DeltaDnMatrix,
+    NodeSlot, EdgeDescriptor, hierarchical_fingerprint, xor_bind_fingerprint,
+};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};
 
