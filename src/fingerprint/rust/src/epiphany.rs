@@ -70,7 +70,7 @@ pub const THREE_SIGMA: u32 = 150;
 // ============================================================================
 
 /// Zone classification based on distance
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EpiphanyZone {
     /// Perfect match (d < μ - 3σ from random)
     /// Distance < ~4850 for random baseline
@@ -706,8 +706,8 @@ impl InsightAmplifier {
     pub fn promoted(&self) -> Vec<(u64, f32)> {
         self.accumulators
             .iter()
-            .filter(|(_, &acc)| acc >= self.promotion_threshold)
-            .map(|(&id, &acc)| (id, acc))
+            .filter(|(_, acc)| **acc >= self.promotion_threshold)
+            .map(|(id, acc)| (*id, *acc))
             .collect()
     }
 

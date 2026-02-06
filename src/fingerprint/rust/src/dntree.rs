@@ -411,7 +411,7 @@ impl CogVerb {
     pub const PLANS: Self = Self(100);
     pub const EXECUTES: Self = Self(101);
     pub const ATTEMPTS: Self = Self(102);
-    pub const SUCCEEDS: Self = Self(103);
+    pub const SUCCEEDS_AT: Self = Self(103);
     pub const FAILS: Self = Self(104);
     pub const COOPERATES: Self = Self(105);
     pub const COMPETES: Self = Self(106);
@@ -463,7 +463,7 @@ impl CogVerb {
     /// Get verb fingerprint (deterministic)
     pub fn to_fingerprint(&self) -> BitpackedVector {
         // Each verb gets a unique, reproducible fingerprint
-        let seed = 0xVERB_SEED_0000 + self.0 as u64;
+        let seed = 0xBE4B5EED00000000 + self.0 as u64;
         BitpackedVector::random(seed)
     }
 
@@ -927,7 +927,7 @@ impl DnTree {
     /// Get all verbs used
     pub fn verb_histogram(&self) -> HashMap<CogVerb, usize> {
         let mut hist = HashMap::new();
-        for (_, verb, _) in self.forward.values().flatten() {
+        for (verb, _, _) in self.forward.values().flatten() {
             *hist.entry(*verb).or_insert(0) += 1;
         }
         hist

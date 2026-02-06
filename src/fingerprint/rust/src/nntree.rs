@@ -340,23 +340,30 @@ impl NnTree {
         let mut current = start.parent();
 
         while let Some(addr) = current {
-            if let Some(NnNode::Internal { centroid, children, count, .. }) = self.nodes.get_mut(&addr) {
-                // Recompute centroid from children
-                let child_fps: Vec<BitpackedVector> = children
+            // Collect child data before mutating
+            let child_data = if let Some(NnNode::Internal { children, .. }) = self.nodes.get(&addr) {
+                let child_addrs: Vec<_> = children.clone();
+                let child_fps: Vec<BitpackedVector> = child_addrs
                     .iter()
                     .filter_map(|c| self.nodes.get(c))
                     .map(|n| n.centroid())
                     .collect();
-
-                let refs: Vec<&BitpackedVector> = child_fps.iter().collect();
-                *centroid = BitpackedVector::bundle(&refs);
-
-                // Update count
-                *count = children
+                let new_count: usize = child_addrs
                     .iter()
                     .filter_map(|c| self.nodes.get(c))
                     .map(|n| n.count())
                     .sum();
+                Some((child_fps, new_count))
+            } else {
+                None
+            };
+
+            if let Some((child_fps, new_count)) = child_data {
+                if let Some(NnNode::Internal { centroid, count, .. }) = self.nodes.get_mut(&addr) {
+                    let refs: Vec<&BitpackedVector> = child_fps.iter().collect();
+                    *centroid = BitpackedVector::bundle(&refs);
+                    *count = new_count;
+                }
             }
 
             current = addr.parent();
@@ -633,8 +640,8 @@ impl SparseNnTree {
     pub fn compact(&mut self) -> Vec<u64> {
         let cold_ids: Vec<u64> = self.access_counts
             .iter()
-            .filter(|(_, &count)| count < self.access_threshold)
-            .map(|(&id, _)| id)
+            .filter(|(_, count)| **count < self.access_threshold)
+            .map(|(id, _)| *id)
             .collect();
 
         for &id in &cold_ids {

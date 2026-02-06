@@ -637,8 +637,10 @@ mod tests {
         let bytes = header.to_bytes();
         let restored = StorageHeader::from_bytes(&bytes);
 
-        assert_eq!(restored.id, 12345);
-        assert_eq!(restored.flags.rung, 5);
+        let restored_id = { restored.id };
+        let restored_rung = { restored.flags.rung };
+        assert_eq!(restored_id, 12345);
+        assert_eq!(restored_rung, 5);
     }
 
     #[test]

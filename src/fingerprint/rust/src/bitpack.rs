@@ -345,6 +345,36 @@ impl BitpackedVector {
     }
 
     // =========================================================================
+    // BIT FLIPPING (for tests and perturbation)
+    // =========================================================================
+
+    /// Rotate bits by n positions (alias for rotate_left)
+    pub fn rotate_bits(&self, n: usize) -> Self {
+        self.rotate_left(n)
+    }
+
+    /// Flip n random bits using a seed for deterministic randomness
+    pub fn flip_random_bits(&mut self, n: usize, seed: u64) {
+        let mut s0 = seed;
+        let mut s1 = seed.wrapping_mul(0x9E3779B97F4A7C15);
+
+        for _ in 0..n {
+            // xorshift128+
+            let mut s = s0;
+            s0 = s1;
+            s ^= s << 23;
+            s ^= s >> 18;
+            s ^= s1;
+            s ^= s1 >> 5;
+            s1 = s;
+            let val = s0.wrapping_add(s1);
+
+            let bit_idx = (val as usize) % VECTOR_BITS;
+            self.toggle_bit(bit_idx);
+        }
+    }
+
+    // =========================================================================
     // BUNDLING (Majority Voting)
     // =========================================================================
 
@@ -729,7 +759,14 @@ impl<'de> serde::Deserialize<'de> for BitpackedVector {
     where
         D: serde::Deserializer<'de>,
     {
-        let words = <[u64; VECTOR_WORDS]>::deserialize(deserializer)?;
+        let vec = Vec::<u64>::deserialize(deserializer)?;
+        if vec.len() != VECTOR_WORDS {
+            return Err(serde::de::Error::custom(
+                format!("expected {} words, got {}", VECTOR_WORDS, vec.len())
+            ));
+        }
+        let mut words = [0u64; VECTOR_WORDS];
+        words.copy_from_slice(&vec);
         Ok(Self::from_words(words))
     }
 }
