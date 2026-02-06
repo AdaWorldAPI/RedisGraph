@@ -10,10 +10,7 @@
 //! fingerprint information. When schema mode is active, blocks 0..12 carry
 //! semantics and blocks 13..15 carry the markers below.
 
-use super::{
-    BITS_PER_BLOCK, SCHEMA_NODE_EDGE_START, SCHEMA_RL_STATE_START, SCHEMA_GRAPH_CACHE_START,
-    VECTOR_WORDS,
-};
+use super::VECTOR_WORDS;
 
 // ============================================================================
 // BLOCK 13: NODE/EDGE TYPE MARKERS

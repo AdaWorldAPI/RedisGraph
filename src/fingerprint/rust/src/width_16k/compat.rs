@@ -20,10 +20,8 @@
 //! searches with no semantic distortion — they just don't have schema
 //! markers or the extra 6K information bits.
 
-use crate::bitpack::{
-    self, BitpackedVector, VECTOR_WORDS as WORDS_10K, VECTOR_BITS as BITS_10K,
-};
-use super::{VECTOR_WORDS as WORDS_16K, VECTOR_BITS as BITS_16K};
+use crate::bitpack::{BitpackedVector, VECTOR_WORDS as WORDS_10K};
+use super::VECTOR_WORDS as WORDS_16K;
 use super::schema::SchemaSidecar;
 
 // ============================================================================
@@ -226,7 +224,7 @@ mod tests {
     fn test_cross_width_distance_symmetry() {
         let a = BitpackedVector::random(1);
         let b = BitpackedVector::random(2);
-        let a16 = zero_extend(&a);
+        let _a16 = zero_extend(&a);
         let b16 = zero_extend(&b);
 
         // 10K×16K distance should equal 10K×10K distance

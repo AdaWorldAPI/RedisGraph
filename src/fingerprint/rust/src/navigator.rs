@@ -58,7 +58,7 @@ use crate::hamming::{
     hamming_distance_ref, hamming_distance_scalar, hamming_to_similarity,
 };
 use crate::resonance::Resonator;
-use crate::epiphany::{ONE_SIGMA, TWO_SIGMA};
+use crate::epiphany::TWO_SIGMA;
 use crate::{HdrError, Result};
 
 #[cfg(feature = "datafusion-storage")]

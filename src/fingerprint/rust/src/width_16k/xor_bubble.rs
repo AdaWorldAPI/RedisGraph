@@ -55,8 +55,7 @@
 //! Delta-encoding the schema blocks separately gives additional 2-3×
 //! compression on top of the semantic delta encoding.
 
-use super::{VECTOR_WORDS, NUM_BLOCKS, SEMANTIC_BLOCKS, SCHEMA_BLOCK_START};
-use super::schema::SchemaSidecar;
+use super::{VECTOR_WORDS, SCHEMA_BLOCK_START};
 
 // ============================================================================
 // XOR DELTA: Compressed representation of difference between two vectors
@@ -846,7 +845,7 @@ mod tests {
     #[test]
     fn test_schema_only_delta() {
         let mut a = vec![0u64; VECTOR_WORDS];
-        let mut b = vec![0u64; VECTOR_WORDS];
+        let b = vec![0u64; VECTOR_WORDS];
 
         // Only differ in schema region
         a[210] = 0xDEADBEEF;
