@@ -494,6 +494,172 @@ product space that's exponentially larger than the physical representation.
 
 ---
 
+## 8. Orthogonal Superposition Cleaning ("MP3 Trick")
+
+The existing `SuperpositionCleaner` in `crystal_dejavu.rs` cleans noise
+from bundled vectors by thresholding: bits that don't have strong
+majority support are zeroed out. At 256w flat, cleaning is all-or-nothing —
+noise from different conceptual domains is entangled in the same words.
+
+At 32K/3D, cleaning becomes **per-dimension EQ**:
+
+```rust
+/// Per-dimension superposition cleaning.
+/// Each dimension has independent noise characteristics because
+/// the XOR bindings are orthogonal.
+pub fn clean_dimensional(v: &mut HoloVector, threshold: f32) {
+    // Clean X: threshold against X-dimension sigma (45.25)
+    clean_dimension(v.x_mut(), DIM_BITS, threshold);
+
+    // Clean Y: independent noise profile
+    clean_dimension(v.y_mut(), DIM_BITS, threshold);
+
+    // Clean Z: independent noise profile
+    clean_dimension(v.z_mut(), DIM_BITS, threshold);
+
+    // Metadata: never cleaned (it's structured data, not stochastic)
+}
+
+fn clean_dimension(dim: &mut [u64; 128], dim_bits: usize, threshold: f32) {
+    let expected = dim_bits / 2;  // 4096
+    let sigma = (dim_bits as f32 / 4.0).sqrt();  // 45.25
+    let popcount: u32 = dim.iter().map(|w| w.count_ones()).sum();
+
+    // If popcount is within threshold×sigma of expected, the dimension
+    // is mostly noise — zero it (aggressive cleaning)
+    if (popcount as f32 - expected as f32).abs() < threshold * sigma {
+        // Dimension carries no strong signal — zero
+        dim.fill(0);
+    }
+    // Otherwise, clean individual words: zero words whose local
+    // popcount suggests noise rather than signal
+}
+```
+
+**Why "MP3"**: Like MP3's psychoacoustic model that discards inaudible
+frequencies per sub-band, dimensional cleaning discards noise per
+semantic sub-band. X (content) noise doesn't leak into Y (context)
+cleaning. Each dimension has its own perceptual threshold. You can
+aggressively clean Z (relation) while preserving X (content) fidelity,
+just like MP3 can compress high frequencies harder than the vocal range.
+
+**The flat-layout penalty**: At 256w, a noisy relation encoding
+(which would be Z noise at 32K) is spread across all words. Cleaning
+the relation noise also destroys content signal because they share the
+same bit positions. Orthogonal decomposition eliminates this cross-talk.
+
+**SIMD cleaning**: Each dimension is 16 AVX-512 iterations.
+`_mm512_popcnt_epi64` gives per-word popcount in hardware. The
+threshold check is a single `_mm512_cmp_epi64_mask`. Cleaning an entire
+dimension: 16 popcount iterations + 1 comparison + conditional zero =
+~20 cycles per dimension. Full 3D clean: ~60 cycles.
+
+---
+
+## 9. AVX-512 Vector×Vector Product for Weighted Distance
+
+AVX-512 provides integer multiply instructions that eliminate scalar
+arithmetic from weighted dimensional distance entirely.
+
+### The problem with scalar weighting
+
+```rust
+// Naive weighted distance: 3 SIMD passes + scalar math
+let dx = popcnt_dimension_x(a, b);  // 16 AVX-512 iterations
+let dy = popcnt_dimension_y(a, b);  // 16 AVX-512 iterations
+let dz = popcnt_dimension_z(a, b);  // 16 AVX-512 iterations
+let total = wx * dx + wy * dy + wz * dz;  // scalar multiply + add
+```
+
+The scalar `wx * dx + wy * dy + wz * dz` is a pipeline stall: the SIMD
+unit finishes, results move to scalar registers, scalar multiply, scalar
+add, done. Small cost per query, but multiplied by millions of candidates.
+
+### The SIMD-native solution
+
+Pack the three dimensional distances into a single AVX-512 vector and
+multiply by the weight vector in one instruction:
+
+```rust
+use std::arch::x86_64::*;
+
+/// Weighted dimensional distance, fully SIMD.
+/// Zero scalar arithmetic — popcount through weighting through reduction.
+#[target_feature(enable = "avx512f,avx512bw,avx512vpopcntdq")]
+unsafe fn weighted_distance_avx512(
+    a: &HoloVector,
+    b: &HoloVector,
+    weights: __m512i,  // [wx, wy, wz, 0, 0, 0, 0, 0] as u64
+) -> u64 {
+    // Phase 1: Per-dimension popcount (16 iterations each)
+    let dx = popcnt_xor_dimension(&a.words[0..128], &b.words[0..128]);
+    let dy = popcnt_xor_dimension(&a.words[128..256], &b.words[128..256]);
+    let dz = popcnt_xor_dimension(&a.words[256..384], &b.words[256..384]);
+
+    // Phase 2: Pack distances into a single 512-bit register
+    //          [dx, dy, dz, 0, 0, 0, 0, 0]
+    let distances = _mm512_set_epi64(0, 0, 0, 0, 0, dz as i64, dy as i64, dx as i64);
+
+    // Phase 3: Vector×vector multiply (distances × weights)
+    //          Result: [dx*wx, dy*wy, dz*wz, 0, 0, 0, 0, 0]
+    let products = _mm512_mullo_epi64(distances, weights);
+
+    // Phase 4: Horizontal reduction (sum all lanes)
+    _mm512_reduce_add_epi64(products) as u64
+}
+
+/// Inner loop: popcount of XOR across 128 words (one dimension).
+/// 16 AVX-512 iterations, zero remainder.
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn popcnt_xor_dimension(a: &[u64], b: &[u64]) -> u32 {
+    let mut acc = _mm512_setzero_si512();
+    for i in (0..128).step_by(8) {
+        let va = _mm512_loadu_si512(a[i..].as_ptr() as *const _);
+        let vb = _mm512_loadu_si512(b[i..].as_ptr() as *const _);
+        let xor = _mm512_xor_si512(va, vb);
+        let popcnt = _mm512_popcnt_epi64(xor);
+        acc = _mm512_add_epi64(acc, popcnt);
+    }
+    _mm512_reduce_add_epi64(acc) as u32
+}
+```
+
+### Fixed-point weights for pure integer pipeline
+
+To avoid float→int conversion, express weights as fixed-point u64 with
+a scale factor (e.g., 1024):
+
+```
+wx=0.6, wy=0.3, wz=0.1
+→ weights = [614, 307, 102, 0, 0, 0, 0, 0]  (× 1024)
+→ result / 1024 = weighted distance
+```
+
+The entire pipeline — from memory load through XOR through popcount
+through weighting through reduction — is **pure integer SIMD**. No
+float conversion. No scalar register. No pipeline stall.
+
+### Batch optimization: multiple candidates per pass
+
+For batch queries against N candidates, the per-dimension popcounts
+can be computed as a columnar pass and the weighting applied once
+via a single `_mm512_mullo_epi64` per candidate. With 8 u64 lanes
+in AVX-512, you can weight **8 candidates simultaneously** if their
+dimensional distances are packed into lanes:
+
+```
+Lane layout: [dx_cand0, dx_cand1, ..., dx_cand7]
+× weights:   [wx,       wx,       ..., wx      ]
+= products:  [dx0*wx,   dx1*wx,   ..., dx7*wx  ]
+```
+
+Three such multiplies (one per dimension) + horizontal add across
+dimensions = 8 weighted distances in 3 multiply instructions + 2 adds.
+That's **0.625 multiply instructions per candidate** for the weighting
+step.
+
+---
+
 ## Summary: Why Denser = More Compressible
 
 The apparent paradox resolves cleanly:
