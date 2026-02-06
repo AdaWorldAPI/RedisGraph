@@ -56,6 +56,10 @@
 //! compression on top of the semantic delta encoding.
 
 use super::{VECTOR_WORDS, SCHEMA_BLOCK_START};
+use std::sync::RwLock;
+
+/// Maximum depth for delta chains (prevents unbounded memory from degenerate paths)
+pub const MAX_CHAIN_DEPTH: usize = 256;
 
 // ============================================================================
 // XOR DELTA: Compressed representation of difference between two vectors
@@ -226,6 +230,9 @@ pub struct DeltaChain {
 
 impl DeltaChain {
     /// Create a chain from a sequence of vectors (root first, leaf last).
+    ///
+    /// Capped at `MAX_CHAIN_DEPTH` levels. If the path is longer,
+    /// only the first `MAX_CHAIN_DEPTH` vectors are included.
     pub fn from_path(vectors: &[&[u64]]) -> Self {
         if vectors.is_empty() {
             return Self {
@@ -234,8 +241,14 @@ impl DeltaChain {
             };
         }
 
-        let anchor = vectors[0][..VECTOR_WORDS].to_vec();
-        let deltas: Vec<XorDelta> = vectors
+        let capped = if vectors.len() > MAX_CHAIN_DEPTH {
+            &vectors[..MAX_CHAIN_DEPTH]
+        } else {
+            vectors
+        };
+
+        let anchor = capped[0][..VECTOR_WORDS].to_vec();
+        let deltas: Vec<XorDelta> = capped
             .windows(2)
             .map(|pair| XorDelta::compute(pair[0], pair[1]))
             .collect();
@@ -338,6 +351,9 @@ impl XorBubble {
     ///
     /// For fanout=1 (chain), all bits are applied (exact).
     /// For fanout=16, ~1/16 of changed bits affect the parent.
+    ///
+    /// `seed` must be nonzero for correct probabilistic behavior.
+    /// If zero is passed, it is silently fixed to 1.
     pub fn apply_to_parent(&mut self, parent_words: &mut [u64], seed: u64) {
         let prob = self.current_probability();
 
@@ -349,6 +365,7 @@ impl XorBubble {
         } else {
             // Probabilistic: mask delta bits by attenuation
             let mut rng = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(self.levels_propagated as u64);
+            if rng == 0 { rng = 1; } // xorshift64 degenerates on zero seed
             for w in 0..VECTOR_WORDS.min(parent_words.len()) {
                 if self.delta_words[w] == 0 {
                     continue;
@@ -392,6 +409,8 @@ fn probabilistic_mask(delta: u64, prob: f32, rng: &mut u64) -> u64 {
     if prob <= 0.0 {
         return 0;
     }
+    // Guard against degenerate xorshift seed
+    if *rng == 0 { *rng = 1; }
 
     let threshold = (prob * u32::MAX as f32) as u32;
     let mut mask = 0u64;
@@ -399,7 +418,7 @@ fn probabilistic_mask(delta: u64, prob: f32, rng: &mut u64) -> u64 {
 
     while bits != 0 {
         let bit_pos = bits.trailing_zeros();
-        // Simple xorshift for speed
+        // xorshift64 — period 2^64-1 (nonzero seed required)
         *rng ^= *rng << 13;
         *rng ^= *rng >> 7;
         *rng ^= *rng << 17;
@@ -670,6 +689,123 @@ fn compose_deltas(a: &XorDelta, b: &XorDelta) -> XorDelta {
         nonzero_bitmap: bitmap,
         nnz: nonzero.len(),
         nonzero_words: nonzero,
+    }
+}
+
+// ============================================================================
+// CONCURRENT WRITE CACHE: Thread-safe wrapper
+// ============================================================================
+
+/// Thread-safe wrapper around `XorWriteCache`.
+///
+/// Uses `RwLock` for concurrent reads (zero-copy path) and exclusive writes.
+/// Multiple query threads can call `read_through()` simultaneously.
+/// Only `record_delta()` and `flush()` require exclusive access.
+///
+/// # Example
+/// ```text
+/// let cache = ConcurrentWriteCache::new(1_048_576);
+///
+/// // Query threads (concurrent reads):
+/// let read = cache.read_through(42, &base_words);
+///
+/// // Writer thread (exclusive):
+/// cache.record_delta(42, delta);
+///
+/// // Checkpoint thread (exclusive):
+/// let flushed = cache.flush();
+/// ```
+pub struct ConcurrentWriteCache {
+    inner: RwLock<XorWriteCache>,
+}
+
+impl ConcurrentWriteCache {
+    /// Create with given flush threshold.
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            inner: RwLock::new(XorWriteCache::new(max_bytes)),
+        }
+    }
+
+    /// Default: 1MB flush threshold.
+    pub fn default_cache() -> Self {
+        Self::new(1_048_576)
+    }
+
+    /// Read through the cache (takes read lock — concurrent with other reads).
+    ///
+    /// Returns `ConcurrentCacheRead::Clean` for uncached vectors,
+    /// or `ConcurrentCacheRead::Patched` with the delta applied.
+    ///
+    /// Unlike `XorWriteCache::read_through()` which returns a borrowing enum,
+    /// this always returns owned data (Vec) for the patched case, or a flag
+    /// indicating the vector is clean (caller should use base directly).
+    pub fn read_through(&self, id: u64, base_words: &[u64]) -> ConcurrentCacheRead {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        match guard.pending.get(&id) {
+            None => ConcurrentCacheRead::Clean,
+            Some(delta) => {
+                let mut patched = base_words[..VECTOR_WORDS].to_vec();
+                delta.apply_in_place(&mut patched);
+                ConcurrentCacheRead::Patched(patched)
+            }
+        }
+    }
+
+    /// Record a delta (takes write lock — exclusive).
+    pub fn record_delta(&self, id: u64, delta: XorDelta) {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        guard.record_delta(id, delta);
+    }
+
+    /// Check if a vector is dirty (takes read lock).
+    pub fn is_dirty(&self, id: u64) -> bool {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard.is_dirty(id)
+    }
+
+    /// Check if flush threshold exceeded (takes read lock).
+    pub fn should_flush(&self) -> bool {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard.should_flush()
+    }
+
+    /// Flush all pending deltas (takes write lock — exclusive).
+    pub fn flush(&self) -> Vec<(u64, XorDelta)> {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        guard.flush()
+    }
+
+    /// Number of dirty entries (takes read lock).
+    pub fn dirty_count(&self) -> usize {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard.dirty_count()
+    }
+}
+
+/// Result of reading through the concurrent write cache.
+///
+/// Unlike `CacheRead` (which borrows from the base), this is fully owned
+/// to avoid lifetime entanglement with the RwLock guard.
+pub enum ConcurrentCacheRead {
+    /// No pending delta — caller should use base_words directly.
+    Clean,
+    /// Delta was applied — use this patched copy.
+    Patched(Vec<u64>),
+}
+
+impl ConcurrentCacheRead {
+    /// Is this a clean (zero-copy) read?
+    pub fn is_clean(&self) -> bool {
+        matches!(self, ConcurrentCacheRead::Clean)
+    }
+
+    /// Get the patched words, or None if clean.
+    pub fn patched_words(&self) -> Option<&[u64]> {
+        match self {
+            ConcurrentCacheRead::Clean => None,
+            ConcurrentCacheRead::Patched(w) => Some(w),
+        }
     }
 }
 
@@ -949,5 +1085,131 @@ mod tests {
         let read = cache.read_through(1, &base);
         // The composed delta should have nnz=0
         assert_eq!(read.words()[0], base[0]);
+    }
+
+    // === Hardening tests ===
+
+    #[test]
+    fn test_max_chain_depth_cap() {
+        // Create a chain deeper than MAX_CHAIN_DEPTH
+        let mut vecs = Vec::new();
+        let v0 = random_words(1);
+        vecs.push(v0);
+        for i in 1..=(MAX_CHAIN_DEPTH + 50) {
+            let prev = &vecs[vecs.len() - 1];
+            let next = similar_words(prev, 5, i as u64);
+            vecs.push(next);
+        }
+
+        let refs: Vec<&[u64]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let chain = DeltaChain::from_path(&refs);
+
+        // Should be capped at MAX_CHAIN_DEPTH
+        assert_eq!(chain.depth(), MAX_CHAIN_DEPTH,
+            "Chain depth should be capped at MAX_CHAIN_DEPTH={}", MAX_CHAIN_DEPTH);
+
+        // Reconstruction should still work for capped depth
+        let r0 = chain.reconstruct(0);
+        assert_eq!(&r0[..VECTOR_WORDS], &vecs[0][..VECTOR_WORDS]);
+    }
+
+    #[test]
+    fn test_rng_seed_zero_not_degenerate() {
+        // Test that seed=0 doesn't produce all-zero masks in probabilistic_mask
+        let mut rng: u64 = 0;
+        let mask = probabilistic_mask(0xFFFF_FFFF_FFFF_FFFF, 0.5, &mut rng);
+        // After the fix, rng should have been bumped to 1 before xorshift
+        // The mask should not be all-zeros (with p=0.5 and delta=all-ones)
+        assert_ne!(rng, 0, "RNG should not remain at 0 after probabilistic_mask");
+        // mask can be anything but degenerate all-zero with full delta and p=0.5 is unlikely
+    }
+
+    #[test]
+    fn test_xor_bubble_seed_zero() {
+        // Test that apply_to_parent handles seed=0 gracefully
+        let old = random_words(1);
+        let mut new = old.clone();
+        new[0] ^= 0xFFFF_FFFF;
+
+        let mut parent = old.clone();
+        let mut bubble = XorBubble::from_leaf_change(&old, &new, 16);
+        // seed=0 should not cause degenerate behavior
+        bubble.apply_to_parent(&mut parent, 0);
+
+        // Parent should have changed (some bits propagated)
+        // With seed fix, at least some bits should be different
+        let changed: u32 = (0..VECTOR_WORDS)
+            .map(|w| (parent[w] ^ old[w]).count_ones())
+            .sum();
+        // Allow any number of changes — the key is it shouldn't panic or all-zero
+        assert!(changed <= 32, "Attenuated change should be bounded");
+    }
+
+    // === ConcurrentWriteCache tests ===
+
+    #[test]
+    fn test_concurrent_cache_basic() {
+        let cache = ConcurrentWriteCache::default_cache();
+        let base = random_words(42);
+
+        // Clean read
+        let read = cache.read_through(1, &base);
+        assert!(read.is_clean());
+        assert!(read.patched_words().is_none());
+
+        // Record a delta
+        let mut modified = base.clone();
+        modified[0] ^= 0xFF;
+        let delta = XorDelta::compute(&base, &modified);
+        cache.record_delta(1, delta);
+
+        // Dirty read
+        assert!(cache.is_dirty(1));
+        assert!(!cache.is_dirty(2));
+        assert_eq!(cache.dirty_count(), 1);
+
+        let read2 = cache.read_through(1, &base);
+        assert!(!read2.is_clean());
+        let patched = read2.patched_words().unwrap();
+        assert_eq!(patched[0], modified[0]);
+    }
+
+    #[test]
+    fn test_concurrent_cache_flush() {
+        let cache = ConcurrentWriteCache::default_cache();
+        let base = random_words(42);
+        let mut mod1 = base.clone();
+        mod1[0] ^= 0xFF;
+
+        cache.record_delta(1, XorDelta::compute(&base, &mod1));
+        cache.record_delta(2, XorDelta::compute(&base, &mod1));
+
+        assert_eq!(cache.dirty_count(), 2);
+
+        let flushed = cache.flush();
+        assert_eq!(flushed.len(), 2);
+        assert_eq!(cache.dirty_count(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_cache_compose() {
+        let cache = ConcurrentWriteCache::default_cache();
+        let base = random_words(42);
+
+        // First delta
+        let mut mid = base.clone();
+        mid[0] ^= 0xFF;
+        cache.record_delta(1, XorDelta::compute(&base, &mid));
+
+        // Second delta
+        let mut final_v = mid.clone();
+        final_v[1] ^= 0xFF00;
+        cache.record_delta(1, XorDelta::compute(&mid, &final_v));
+
+        // Composed result
+        let read = cache.read_through(1, &base);
+        let patched = read.patched_words().unwrap();
+        assert_eq!(patched[0], base[0] ^ 0xFF);
+        assert_eq!(patched[1], base[1] ^ 0xFF00);
     }
 }

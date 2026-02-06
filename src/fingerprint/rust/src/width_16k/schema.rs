@@ -654,6 +654,24 @@ impl SchemaSidecar {
     /// Number of words in schema region (3 blocks × 16 words = 48)
     pub const WORD_COUNT: usize = 3 * 16; // 48
 
+    /// Current schema layout version.
+    ///
+    /// Stored in the top 8 bits of words[208]. When the layout changes,
+    /// increment this and add migration logic in `read_from_words()`.
+    /// Version 0 = legacy (no version tag), Version 1 = current.
+    pub const SCHEMA_VERSION: u8 = 1;
+
+    /// Word offset within the schema region where the version byte lives.
+    /// Uses the last word of block 13 (word offset +15 = word 223) which is
+    /// otherwise unused padding. Top 8 bits hold the version.
+    pub const VERSION_WORD_OFFSET: usize = 15; // relative to WORD_OFFSET
+
+    /// Mask for the version byte (top 8 bits of the version word)
+    pub const VERSION_MASK: u64 = 0xFF << 56;
+
+    /// Mask to clear the version byte
+    pub const ANI_WORD0_MASK: u64 = !Self::VERSION_MASK;
+
     /// Write schema markers into the word array at the correct offset.
     ///
     /// `words` must be at least 256 elements (full 16K vector).
@@ -662,7 +680,7 @@ impl SchemaSidecar {
         assert!(words.len() >= VECTOR_WORDS);
         let base = Self::WORD_OFFSET;
 
-        // Block 13: ANI levels (words 208-209)
+        // Block 13: ANI levels (words 208-209) — no masking needed now
         let ani = self.ani_levels.pack();
         words[base] = ani as u64;
         words[base + 1] = (ani >> 64) as u64;
@@ -735,6 +753,22 @@ impl SchemaSidecar {
 
         // Block 15: Graph metrics (word 248)
         words[block15_base + 8] = self.metrics.pack();
+
+        // Version byte: written to top 8 bits of word[base+15] (end of block 13 padding)
+        words[base + Self::VERSION_WORD_OFFSET] =
+            (words[base + Self::VERSION_WORD_OFFSET] & Self::ANI_WORD0_MASK)
+            | ((Self::SCHEMA_VERSION as u64) << 56);
+    }
+
+    /// Read the schema version from a word array.
+    ///
+    /// Returns 0 for legacy data (no version tag), 1+ for versioned data.
+    /// The version byte is stored in the top 8 bits of word[base+15] (block 13 padding).
+    pub fn read_version(words: &[u64]) -> u8 {
+        if words.len() < VECTOR_WORDS {
+            return 0;
+        }
+        ((words[Self::WORD_OFFSET + Self::VERSION_WORD_OFFSET] >> 56) & 0xFF) as u8
     }
 
     /// Read schema markers from the word array.
@@ -744,7 +778,11 @@ impl SchemaSidecar {
         let block14_base = base + 16;
         let block15_base = base + 32;
 
-        // Block 13: ANI
+        let _version = Self::read_version(words);
+        // Version 0 and 1 share the same layout.
+        // Future versions: add match on _version here for migration.
+
+        // Block 13: ANI levels (words 208-209) — no masking, version is elsewhere
         let ani = words[base] as u128 | ((words[base + 1] as u128) << 64);
         let ani_levels = AniLevels::unpack(ani);
 
@@ -980,5 +1018,65 @@ mod tests {
         assert_eq!(recovered.metrics.pagerank, 999);
         assert_eq!(recovered.metrics.hop_to_root, 2);
         assert!(recovered.neighbors.might_contain(123));
+    }
+
+    #[test]
+    fn test_schema_version_byte() {
+        let mut words = [0u64; VECTOR_WORDS];
+
+        // Before writing schema, version should be 0 (legacy)
+        assert_eq!(SchemaSidecar::read_version(&words), 0);
+
+        // Write schema
+        let schema = SchemaSidecar::default();
+        schema.write_to_words(&mut words);
+
+        // Version should now be 1
+        assert_eq!(SchemaSidecar::read_version(&words), 1);
+
+        // Version byte should not corrupt ANI levels
+        let mut schema2 = SchemaSidecar::default();
+        schema2.ani_levels.planning = 500;
+        schema2.ani_levels.r#abstract = 800;
+        schema2.write_to_words(&mut words);
+
+        let recovered = SchemaSidecar::read_from_words(&words);
+        assert_eq!(recovered.ani_levels.planning, 500);
+        assert_eq!(recovered.ani_levels.r#abstract, 800);
+        assert_eq!(SchemaSidecar::read_version(&words), 1);
+    }
+
+    #[test]
+    fn test_schema_version_backward_compat() {
+        // Simulate legacy data: all zeros (version 0)
+        let words = [0u64; VECTOR_WORDS];
+        assert_eq!(SchemaSidecar::read_version(&words), 0);
+
+        // Reading from all-zero words should give default values
+        let schema = SchemaSidecar::read_from_words(&words);
+        assert_eq!(schema.ani_levels.planning, 0);
+        assert_eq!(schema.nars_truth.f(), 0.0);
+        assert_eq!(schema.metrics.pagerank, 0);
+    }
+
+    #[test]
+    fn test_schema_version_word_isolation() {
+        // Version is at word[base+15] (word 223), bits 56-63.
+        // Verify it doesn't interfere with surrounding data.
+        let mut words = [0u64; VECTOR_WORDS];
+
+        // Fill word 223 with a known pattern
+        let base = SchemaSidecar::WORD_OFFSET;
+        words[base + 15] = 0x00FFFFFFFFFFFFFF; // lower 56 bits set
+
+        let mut schema = SchemaSidecar::default();
+        schema.write_to_words(&mut words);
+
+        // Version should be 1 in top 8 bits
+        assert_eq!(SchemaSidecar::read_version(&words), 1);
+        // Lower 56 bits should be preserved from write (may be overwritten by schema)
+        // The important thing is version doesn't leak into ANI words
+        let recovered = SchemaSidecar::read_from_words(&words);
+        assert_eq!(recovered.ani_levels.planning, 0); // default
     }
 }
