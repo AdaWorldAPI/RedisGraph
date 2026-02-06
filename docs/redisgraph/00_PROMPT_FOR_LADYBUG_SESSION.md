@@ -30,17 +30,19 @@ in lib.rs. Neither is correct. The RedisGraph engine proved that 256 words
 
 Read docs/redisgraph/01_THE_256_WORD_SOLUTION.md for the complete analysis.
 
-### 2. Stop Rewriting LanceDB — Extend DataFusion Instead
+### 2. Stop Reimplementing LanceDB — Vendor-Import and Extend
 
-The lance.rs / database.rs path is broken and unnecessary. ArrowZeroCopy already
-works. The right move is DataFusion extensions:
-- Custom TableProvider that wraps BindSpace as an Arrow data source
-- UDFs for hamming_distance, xor_bind, schema_predicate that operate on
-  FixedSizeBinary(2048) columns
-- PhysicalOptimizer rule that pushes HDR cascade filtering below sort
-- ExecutionPlan that does block-masked distance with early exit
+The codebase hardcoded XOR backup, caching, and similar features into the
+BindSpace-Arrow layer (lance_zero_copy/, unified_engine.rs) instead of
+vendor-importing LanceDB and adding those features as Lance extensions.
+The vendor directory already has Lance 2.1 source. The right path is:
+- Fix Cargo.toml to use vendor path (the source is already there)
+- Update lance.rs API calls for 2.1 (mechanical changes)
+- Add XOR delta column, XOR backup, schema-filtered scan TO vendor Lance
+- Use DataFusion extensions for query (TableProvider + UDFs + optimizer)
+  instead of reimplementing query capabilities in application code
 
-Read docs/redisgraph/02_DATAFUSION_NOT_LANCEDB.md for the implementation guide.
+Read docs/redisgraph/02_DATAFUSION_NOT_LANCEDB.md for the 3-layer architecture.
 
 ### 3. The 4096 CAM Prefix Fits Naturally at 256 Words
 
