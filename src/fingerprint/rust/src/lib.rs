@@ -43,6 +43,8 @@
 //! This enables O(1) retrieval: given edge=A⊗verb⊗B and verb and B,
 //! compute A directly without searching!
 
+pub mod width_10k;
+pub mod width_16k;
 pub mod bitpack;
 pub mod hamming;
 pub mod resonance;
