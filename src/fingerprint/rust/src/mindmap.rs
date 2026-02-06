@@ -712,14 +712,14 @@ impl MindmapBuilder {
 
     /// Add branch to current node
     pub fn branch(mut self, label: &str) -> Self {
-        if let Some(ref current) = self.current.clone() {
-            let branch = self.next_branch(current);
+        if let Some(current) = self.current.clone() {
+            let branch = self.next_branch(&current);
             let addr = current.child(branch);
             self.mindmap.add_node_at(addr.clone(), label);
 
             // Connect to parent
             if let (Some(&from), Some(&to)) =
-                (self.mindmap.addr_to_idx.get(&addr), self.mindmap.addr_to_idx.get(current))
+                (self.mindmap.addr_to_idx.get(&addr), self.mindmap.addr_to_idx.get(&current))
             {
                 self.mindmap.connect_indices(from, CogVerb::PART_OF, to, 1.0);
             }
@@ -731,7 +731,7 @@ impl MindmapBuilder {
 
     /// Add sibling to current node
     pub fn sibling(mut self, label: &str) -> Self {
-        if let Some(ref current) = self.current.clone() {
+        if let Some(current) = self.current.clone() {
             if let Some(parent) = current.parent() {
                 let branch = self.next_branch(&parent);
                 let addr = parent.child(branch);
