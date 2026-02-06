@@ -12,11 +12,11 @@ name = "holograph"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = ["simd", "datafusion-storage"]
+default = ["simd", "datafusion-storage", "lancedb"]
 simd = []
 parallel = ["rayon"]
 datafusion-storage = ["dep:datafusion", "dep:arrow", "dep:tokio"]
-lancedb = ["dep:lance"]
+lancedb = ["dep:lance", "datafusion-storage"]
 ffi = []
 full = ["simd", "parallel", "datafusion-storage", "lancedb", "ffi"]
 

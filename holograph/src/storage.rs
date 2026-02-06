@@ -54,7 +54,7 @@ use arrow::ipc::writer::FileWriter;
 
 use crate::bitpack::{
     BitpackedVector, VectorRef, VectorSlice,
-    VECTOR_BYTES, VECTOR_WORDS, PADDED_VECTOR_BYTES,
+    VECTOR_BITS, VECTOR_BYTES, VECTOR_WORDS, PADDED_VECTOR_BYTES,
 };
 use crate::hamming::{
     Belichtung, StackedPopcount, hamming_distance_ref,
@@ -94,24 +94,30 @@ pub struct VectorBatch {
 impl VectorBatch {
     /// Create from Arrow RecordBatch
     pub fn from_record_batch(batch: RecordBatch) -> Result<Self> {
-        let fingerprints = batch
-            .column_by_name(FIELD_FINGERPRINT)
-            .ok_or_else(|| HdrError::Storage("Missing fingerprint column".into()))?
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .ok_or_else(|| HdrError::Storage("Invalid fingerprint column type".into()))?;
+        let fingerprints = Arc::new(
+            batch
+                .column_by_name(FIELD_FINGERPRINT)
+                .ok_or_else(|| HdrError::Storage("Missing fingerprint column".into()))?
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .ok_or_else(|| HdrError::Storage("Invalid fingerprint column type".into()))?
+                .clone(),
+        );
 
-        let ids = batch
-            .column_by_name(FIELD_ID)
-            .ok_or_else(|| HdrError::Storage("Missing id column".into()))?
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| HdrError::Storage("Invalid id column type".into()))?;
+        let ids = Arc::new(
+            batch
+                .column_by_name(FIELD_ID)
+                .ok_or_else(|| HdrError::Storage("Missing id column".into()))?
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| HdrError::Storage("Invalid id column type".into()))?
+                .clone(),
+        );
 
         Ok(Self {
             batch,
-            fingerprints: Arc::new(fingerprints.clone()),
-            ids: Arc::new(ids.clone()),
+            fingerprints,
+            ids,
         })
     }
 
@@ -314,12 +320,12 @@ impl VectorBatchBuilder {
 
     /// Number of vectors added
     pub fn len(&self) -> usize {
-        self.ids.len()
+        self.next_id as usize
     }
 
     /// Is empty?
     pub fn is_empty(&self) -> bool {
-        self.ids.len() == 0
+        self.next_id == 0
     }
 }
 
@@ -836,7 +842,7 @@ pub mod datafusion {
 /// Uses PADDED_VECTOR_BYTES (1280) so every vector in the FixedSizeBinary
 /// column is 64-byte aligned, enabling zero-copy SIMD Hamming distance
 /// directly on the Arrow buffer.
-fn create_schema() -> Schema {
+pub(crate) fn create_schema() -> Schema {
     Schema::new(vec![
         Field::new(FIELD_ID, DataType::UInt64, false),
         Field::new(FIELD_FINGERPRINT, DataType::FixedSizeBinary(PADDED_VECTOR_BYTES as i32), false),

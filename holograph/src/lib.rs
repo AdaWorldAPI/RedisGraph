@@ -90,6 +90,8 @@ pub mod graphblas;
 pub mod mindmap;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
+#[cfg(feature = "lancedb")]
+pub mod lance_store;
 #[cfg(feature = "datafusion-storage")]
 pub mod query;
 
@@ -173,6 +175,8 @@ pub use graphblas::{GrBMatrix, GrBVector, HdrSemiring, Semiring};
 pub use mindmap::{GrBMindmap, MindmapBuilder, MindmapNode, NodeType};
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch, ArrowBatchSearch, BatchSearchResult};
+#[cfg(feature = "lancedb")]
+pub use lance_store::LanceStore;
 
 // ========================================================================
 // Error types

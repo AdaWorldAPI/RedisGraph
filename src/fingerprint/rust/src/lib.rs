@@ -68,6 +68,8 @@ pub mod sentence_crystal;
 pub mod navigator;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
+#[cfg(feature = "lancedb")]
+pub mod lance_store;
 #[cfg(feature = "datafusion-storage")]
 pub mod query;
 #[cfg(feature = "ffi")]
@@ -121,6 +123,8 @@ pub use navigator::{Navigator, NavResult, CypherArg, CypherYield};
 pub use navigator::ZeroCopyCursor;
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch, ArrowBatchSearch, BatchSearchResult};
+#[cfg(feature = "lancedb")]
+pub use lance_store::LanceStore;
 
 /// Error types for HDR operations
 #[derive(Debug, thiserror::Error)]

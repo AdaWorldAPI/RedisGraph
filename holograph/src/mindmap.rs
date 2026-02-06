@@ -290,8 +290,8 @@ impl GrBMindmap {
         let mut edges = Vec::new();
 
         for (&cat, mat) in &self.adjacency {
-            for (_, col, _) in mat.iter_row(idx) {
-                edges.push((col, cat));
+            for entry in mat.iter().filter(|e| e.row == idx) {
+                edges.push((entry.col, cat));
             }
         }
 
@@ -303,8 +303,8 @@ impl GrBMindmap {
         let mut edges = Vec::new();
 
         for (&cat, mat) in &self.adjacency {
-            for (row, _, _) in mat.iter_col(idx) {
-                edges.push((row, cat));
+            for entry in mat.iter().filter(|e| e.col == idx) {
+                edges.push((entry.row, cat));
             }
         }
 
@@ -316,7 +316,7 @@ impl GrBMindmap {
     // ========================================================================
 
     /// BFS from source (GraphBLAS push-pull)
-    pub fn bfs(&self, source: GrBIndex, max_depth: usize) -> Vec<(GrBIndex, u32)> {
+    pub fn bfs(&mut self, source: GrBIndex, max_depth: usize) -> Vec<(GrBIndex, u32)> {
         let mut visited = GrBVector::new(self.size);
         let mut frontier = GrBVector::new(self.size);
 
@@ -478,11 +478,11 @@ impl GrBMindmap {
     pub fn pattern_match(&self, pattern: &BitpackedVector, threshold: u32) -> Vec<(GrBIndex, GrBIndex, u32)> {
         let mut matches = Vec::new();
 
-        for (row, col, val) in self.combined_adj.iter() {
-            if let Some(edge_fp) = val.as_vector() {
+        for entry in self.combined_adj.iter() {
+            if let Some(edge_fp) = entry.value.as_vector() {
                 let dist = hamming_distance_scalar(pattern, edge_fp);
                 if dist <= threshold {
-                    matches.push((row, col, dist));
+                    matches.push((entry.row, entry.col, dist));
                 }
             }
         }
@@ -540,7 +540,7 @@ impl GrBMindmap {
     }
 
     /// Find path between two nodes (BFS-based)
-    pub fn path(&self, from: GrBIndex, to: GrBIndex) -> Option<Vec<GrBIndex>> {
+    pub fn path(&mut self, from: GrBIndex, to: GrBIndex) -> Option<Vec<GrBIndex>> {
         let bfs_result = self.bfs(from, 10);
 
         if !bfs_result.iter().any(|(idx, _)| *idx == to) {
@@ -599,8 +599,8 @@ impl GrBMindmap {
         dot.push_str("\n");
 
         // Edges
-        for (row, col, _) in self.combined_adj.iter() {
-            dot.push_str(&format!("  n{} -> n{};\n", row, col));
+        for entry in self.combined_adj.iter() {
+            dot.push_str(&format!("  n{} -> n{};\n", entry.row, entry.col));
         }
 
         dot.push_str("}\n");
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_bfs() {
-        let mindmap = MindmapBuilder::new("Root")
+        let mut mindmap = MindmapBuilder::new("Root")
             .branch("A")
                 .branch("A1")
                 .sibling("A2")

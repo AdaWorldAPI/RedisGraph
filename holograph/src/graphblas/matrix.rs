@@ -203,7 +203,7 @@ impl GrBMatrix {
     /// Iterate over non-zero entries
     pub fn iter(&self) -> impl Iterator<Item = SparseEntry> + '_ {
         match &self.storage {
-            MatrixStorage::Coo(coo) => IterImpl::Coo(coo.iter()),
+            MatrixStorage::Coo(coo) => IterImpl::Coo(Box::new(coo.iter())),
             MatrixStorage::Csr(csr) => IterImpl::Csr(CsrIter::new(csr)),
             MatrixStorage::Empty => IterImpl::Empty,
         }
