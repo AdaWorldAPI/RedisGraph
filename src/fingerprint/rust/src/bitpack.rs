@@ -18,6 +18,19 @@ pub const VECTOR_WORDS: usize = (VECTOR_BITS + 63) / 64;
 /// Bytes per vector: 157 × 8 = 1,256 bytes
 pub const VECTOR_BYTES: usize = VECTOR_WORDS * 8;
 
+/// Padded words for 64-byte (cache-line) alignment: ceil(157/8)*8 = 160
+///
+/// In Arrow `FixedSizeBinary(PADDED_VECTOR_BYTES)`, every vector starts at
+/// a 64-byte boundary (since 1280 = 20 × 64), enabling zero-copy SIMD loads
+/// directly on the Arrow buffer without materializing BitpackedVector.
+pub const PADDED_VECTOR_WORDS: usize = (VECTOR_WORDS + 7) & !7; // 160
+
+/// Padded bytes per vector: 160 × 8 = 1,280 bytes = 20 × 64 bytes
+///
+/// Use this (not VECTOR_BYTES) for Arrow FixedSizeBinary column width.
+/// The 3 padding words (157..160) are always zero.
+pub const PADDED_VECTOR_BYTES: usize = PADDED_VECTOR_WORDS * 8; // 1280
+
 /// Mask for the last word (only 16 bits used: 10000 - 156×64 = 16)
 const LAST_WORD_BITS: usize = VECTOR_BITS - (VECTOR_WORDS - 1) * 64;
 const LAST_WORD_MASK: u64 = (1u64 << LAST_WORD_BITS) - 1;
@@ -428,6 +441,213 @@ impl BitpackedVector {
 }
 
 // =========================================================================
+// ZERO-COPY VECTOR VIEW
+// =========================================================================
+
+/// Trait for anything that can be read as a word-level vector slice.
+///
+/// This enables all Hamming/Belichtung/StackedPopcount operations to work
+/// on both owned `BitpackedVector` and borrowed `VectorSlice` (which points
+/// directly into an Arrow buffer with zero copies).
+pub trait VectorRef {
+    /// Access the underlying u64 words. Always exactly VECTOR_WORDS long.
+    fn words(&self) -> &[u64];
+
+    /// Population count (total set bits)
+    #[inline]
+    fn popcount(&self) -> u32 {
+        self.words().iter().map(|w| w.count_ones()).sum()
+    }
+
+    /// Density (fraction of bits set)
+    #[inline]
+    fn density(&self) -> f32 {
+        self.popcount() as f32 / VECTOR_BITS as f32
+    }
+
+    /// Per-word popcount for hierarchical filtering
+    #[inline]
+    fn stacked_popcount(&self) -> [u8; VECTOR_WORDS] {
+        let mut counts = [0u8; VECTOR_WORDS];
+        let w = self.words();
+        for i in 0..VECTOR_WORDS {
+            counts[i] = w[i].count_ones() as u8;
+        }
+        counts
+    }
+
+    /// Promote to owned BitpackedVector (copies if borrowed)
+    fn to_owned_vector(&self) -> BitpackedVector {
+        let mut words = [0u64; VECTOR_WORDS];
+        words.copy_from_slice(&self.words()[..VECTOR_WORDS]);
+        BitpackedVector::from_words(words)
+    }
+}
+
+impl VectorRef for BitpackedVector {
+    #[inline]
+    fn words(&self) -> &[u64] {
+        &self.words
+    }
+}
+
+/// A zero-copy borrowed view into vector data stored in an Arrow buffer.
+///
+/// # Why This Matters
+///
+/// Without `VectorSlice`, every vector access from Arrow does this:
+/// ```text
+/// Arrow Buffer → &[u8] → from_bytes() → copy 1256 bytes → BitpackedVector
+///                                         ^^^ O(n) memory bloat
+/// ```
+///
+/// With `VectorSlice`, the path is:
+/// ```text
+/// Arrow Buffer → &[u8] → reinterpret as &[u64] → VectorSlice (zero-copy)
+/// ```
+///
+/// Combined with cascaded Hamming (Belichtungsmesser filters 90% in ~14 cycles),
+/// a GQL query touching 1M vectors copies 0 bytes for the 999,000 that fail
+/// the cascade.
+///
+/// # Alignment
+///
+/// Arrow's FixedSizeBinary column uses `PADDED_VECTOR_BYTES` (1280) per entry.
+/// Since 1280 = 20 × 64, every entry is 64-byte (cache-line) aligned when
+/// the Arrow buffer itself is 64-byte aligned (which Arrow guarantees).
+/// This means SIMD loads work directly on the slice — no memcpy needed.
+///
+/// # Safety
+///
+/// The borrowed slice must be at least `VECTOR_WORDS` u64s long and the data
+/// must be valid (padding bits in word[156] must be masked). Arrow columns
+/// built with `PaddedVectorBuilder` satisfy both invariants.
+#[derive(Clone, Copy)]
+pub struct VectorSlice<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> VectorSlice<'a> {
+    /// Create from a u64 word slice.
+    ///
+    /// # Panics
+    /// Panics if `words.len() < VECTOR_WORDS`.
+    #[inline]
+    pub fn from_words(words: &'a [u64]) -> Self {
+        debug_assert!(words.len() >= VECTOR_WORDS,
+            "VectorSlice requires {} words, got {}", VECTOR_WORDS, words.len());
+        Self { words: &words[..VECTOR_WORDS] }
+    }
+
+    /// Create from a byte slice (Arrow FixedSizeBinary value).
+    ///
+    /// # Safety
+    /// The byte slice must be at least `VECTOR_BYTES` long and 8-byte aligned.
+    /// Arrow's FixedSizeBinary values in a padded column satisfy this because
+    /// the buffer is 64-byte aligned and each entry is 1280 bytes (divisible by 8).
+    #[inline]
+    pub unsafe fn from_bytes_unchecked(bytes: &'a [u8]) -> Self {
+        debug_assert!(bytes.len() >= VECTOR_BYTES);
+        debug_assert!(bytes.as_ptr() as usize % 8 == 0,
+            "VectorSlice requires 8-byte alignment");
+        let ptr = bytes.as_ptr() as *const u64;
+        let words = unsafe { std::slice::from_raw_parts(ptr, VECTOR_WORDS) };
+        Self { words }
+    }
+
+    /// Safe creation from bytes — checks alignment and length, falls back to copy.
+    ///
+    /// Prefers zero-copy reinterpret but will copy if alignment is wrong.
+    /// With PADDED_VECTOR_BYTES columns this should never copy.
+    pub fn from_bytes_or_copy(bytes: &'a [u8]) -> std::result::Result<Self, BitpackedVector> {
+        if bytes.len() < VECTOR_BYTES {
+            return Err(BitpackedVector::zero());
+        }
+        if bytes.as_ptr() as usize % 8 == 0 {
+            // Zero-copy path: pointer is already u64-aligned
+            Ok(unsafe { Self::from_bytes_unchecked(bytes) })
+        } else {
+            // Fallback: misaligned, must copy (should never happen with padded Arrow)
+            Err(BitpackedVector::from_bytes(bytes).unwrap_or_else(|_| BitpackedVector::zero()))
+        }
+    }
+
+    /// Get the underlying word slice
+    #[inline]
+    pub fn as_words(&self) -> &'a [u64] {
+        self.words
+    }
+}
+
+impl<'a> VectorRef for VectorSlice<'a> {
+    #[inline]
+    fn words(&self) -> &[u64] {
+        self.words
+    }
+}
+
+impl<'a> fmt::Debug for VectorSlice<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VectorSlice({} words, {} set)",
+            VECTOR_WORDS, self.popcount())
+    }
+}
+
+// =========================================================================
+// GENERIC WORD-LEVEL OPERATIONS ON VectorRef
+// =========================================================================
+
+/// XOR two VectorRef into a new owned vector
+#[inline]
+pub fn xor_ref(a: &dyn VectorRef, b: &dyn VectorRef) -> BitpackedVector {
+    let aw = a.words();
+    let bw = b.words();
+    let mut result = [0u64; VECTOR_WORDS];
+    for i in 0..VECTOR_WORDS {
+        result[i] = aw[i] ^ bw[i];
+    }
+    BitpackedVector::from_words(result)
+}
+
+// =========================================================================
+// PADDED BYTE CONVERSION
+// =========================================================================
+
+impl BitpackedVector {
+    /// Convert to padded bytes for Arrow storage.
+    ///
+    /// Returns 1280 bytes (160 words) with 3 trailing zero-words.
+    /// Use this instead of `to_bytes()` when building Arrow columns
+    /// with `FixedSizeBinary(1280)`.
+    pub fn to_padded_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(PADDED_VECTOR_BYTES);
+        for word in &self.words {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        // 3 padding words of zeros (157..160)
+        bytes.resize(PADDED_VECTOR_BYTES, 0);
+        bytes
+    }
+
+    /// Create from padded bytes (1280 bytes), ignoring padding words.
+    pub fn from_padded_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < VECTOR_BYTES {
+            return Err(HdrError::DimensionMismatch {
+                expected: PADDED_VECTOR_BYTES,
+                got: bytes.len(),
+            });
+        }
+        // Only read the first 157 words, ignore padding
+        let mut words = [0u64; VECTOR_WORDS];
+        for (i, word) in words.iter_mut().enumerate() {
+            let start = i * 8;
+            *word = u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap());
+        }
+        Ok(Self::from_words(words))
+    }
+}
+
+// =========================================================================
 // TRAIT IMPLEMENTATIONS
 // =========================================================================
 
@@ -616,5 +836,98 @@ mod tests {
         // Bits beyond VECTOR_BITS should be 0
         let last_word = v.words[VECTOR_WORDS - 1];
         assert_eq!(last_word, LAST_WORD_MASK);
+    }
+
+    // =====================================================================
+    // ZERO-COPY / ALIGNMENT TESTS
+    // =====================================================================
+
+    #[test]
+    fn test_padded_constants() {
+        // 160 words = 20 cache lines
+        assert_eq!(PADDED_VECTOR_WORDS, 160);
+        // 1280 bytes, divisible by 64
+        assert_eq!(PADDED_VECTOR_BYTES, 1280);
+        assert_eq!(PADDED_VECTOR_BYTES % 64, 0);
+        // Padded > unpadded
+        assert!(PADDED_VECTOR_BYTES > VECTOR_BYTES);
+        assert_eq!(PADDED_VECTOR_BYTES - VECTOR_BYTES, 24); // 3 words padding
+    }
+
+    #[test]
+    fn test_padded_bytes_roundtrip() {
+        let original = BitpackedVector::random(42);
+        let padded = original.to_padded_bytes();
+        assert_eq!(padded.len(), PADDED_VECTOR_BYTES);
+
+        // Padding words must be zero
+        for byte in &padded[VECTOR_BYTES..] {
+            assert_eq!(*byte, 0);
+        }
+
+        let recovered = BitpackedVector::from_padded_bytes(&padded).unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_vector_slice_from_words() {
+        let v = BitpackedVector::random(123);
+        let words = v.words();
+        let slice = VectorSlice::from_words(words);
+
+        // VectorRef trait: popcount must match
+        assert_eq!(VectorRef::popcount(&slice), v.popcount());
+        assert_eq!(VectorRef::density(&slice), v.density());
+
+        // to_owned_vector must be identical
+        let owned = slice.to_owned_vector();
+        assert_eq!(owned, v);
+    }
+
+    #[test]
+    fn test_vector_slice_from_padded_bytes() {
+        let v = BitpackedVector::random(456);
+        let padded = v.to_padded_bytes();
+
+        // Simulate what Arrow does: provide aligned byte slice
+        // Vec<u8> is 1-byte aligned, but we can check the safe fallback
+        match VectorSlice::from_bytes_or_copy(&padded) {
+            Ok(slice) => {
+                assert_eq!(VectorRef::popcount(&slice), v.popcount());
+                assert_eq!(slice.to_owned_vector(), v);
+            }
+            Err(owned) => {
+                // Fallback path: copied but still correct
+                assert_eq!(owned, v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_xor_ref_matches_xor() {
+        let a = BitpackedVector::random(10);
+        let b = BitpackedVector::random(20);
+
+        let xor_owned = a.xor(&b);
+        let xor_via_ref = xor_ref(&a as &dyn VectorRef, &b as &dyn VectorRef);
+
+        assert_eq!(xor_owned, xor_via_ref);
+    }
+
+    #[test]
+    fn test_vector_ref_polymorphism() {
+        // Owned BitpackedVector and borrowed VectorSlice should give
+        // identical results through VectorRef trait
+        let v = BitpackedVector::random(789);
+        let words = v.words();
+        let slice = VectorSlice::from_words(words);
+
+        let owned_pc = VectorRef::popcount(&v);
+        let slice_pc = VectorRef::popcount(&slice);
+        assert_eq!(owned_pc, slice_pc);
+
+        let owned_stacked = VectorRef::stacked_popcount(&v);
+        let slice_stacked = VectorRef::stacked_popcount(&slice);
+        assert_eq!(owned_stacked, slice_stacked);
     }
 }
