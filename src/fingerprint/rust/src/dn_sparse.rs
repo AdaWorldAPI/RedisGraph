@@ -2360,6 +2360,99 @@ impl DnGraph {
         self.semiring_traverse(source, 0u32, &semiring, max_depth)
     }
 
+    /// Voyager deep-field resonance: find weak signals hidden in noise.
+    ///
+    /// This is the orthogonal superposition cleaning trick applied to
+    /// graph traversal. When tight resonance search finds no results,
+    /// this method:
+    ///
+    /// 1. Does a broad cascaded resonance sweep (large radius)
+    /// 2. Collects edge fingerprints that weakly resonate
+    /// 3. Stacks them via majority vote (superposition cleaning)
+    ///    - Noise is random → cancels in majority vote
+    ///    - Signal is consistent → survives the vote
+    /// 4. Re-measures the cleaned signal against query
+    ///
+    /// If the cleaned signal resonates more strongly than any individual
+    /// edge, it's a Voyager star: a coherent pattern invisible in any
+    /// single edge but emergent from their superposition.
+    ///
+    /// Returns: (cleaned_fingerprint, cleaned_distance, noise_reduction_factor)
+    /// where noise_reduction > 1.5 indicates a genuine signal.
+    pub fn voyager_resonance(
+        &self,
+        source: PackedDn,
+        query: &BitpackedVector,
+        max_depth: usize,
+    ) -> Option<(BitpackedVector, u32, f32)> {
+        // Phase 1: Broad sweep to collect weak signals
+        let broad_radius = VECTOR_BITS as u32 / 3; // ~3333 = 33% different
+        let broad_results = self.cascaded_resonance_traverse(
+            source, query, broad_radius, max_depth,
+        );
+
+        // Phase 2: Compute edge fingerprints for nodes with nonzero resonance
+        let mut weak_fps: Vec<BitpackedVector> = Vec::new();
+        let mut best_individual_distance = u32::MAX;
+
+        for (&dst, &resonance) in &broad_results {
+            if resonance == 0 || dst == source {
+                continue;
+            }
+            // Compute the actual edge fingerprint
+            if let Some(edge_fp) = self.edge_fingerprint(source, dst) {
+                let dist = hamming_distance_scalar(&edge_fp, query);
+                if dist < best_individual_distance {
+                    best_individual_distance = dist;
+                }
+                weak_fps.push(edge_fp);
+            }
+        }
+
+        if weak_fps.len() < 3 {
+            return None; // not enough weak signals to stack
+        }
+
+        // Phase 3: Orthogonal superposition cleaning
+        // XOR each with query to get difference signals, then majority vote
+        let threshold = weak_fps.len() / 2;
+        let deltas: Vec<BitpackedVector> = weak_fps.iter()
+            .map(|fp| query.xor(fp))
+            .collect();
+
+        let mut cleaned_delta = BitpackedVector::zero();
+        for word_idx in 0..VECTOR_WORDS {
+            let mut result_word = 0u64;
+            for bit in 0..64 {
+                let mask = 1u64 << bit;
+                let votes: usize = deltas.iter()
+                    .filter(|d| d.words()[word_idx] & mask != 0)
+                    .count();
+                if votes > threshold {
+                    result_word |= mask;
+                }
+            }
+            cleaned_delta.words_mut()[word_idx] = result_word;
+        }
+
+        // Apply cleaned delta back to query to get the "star"
+        let star = query.xor(&cleaned_delta);
+        let cleaned_distance = hamming_distance_scalar(query, &star);
+
+        // Phase 4: Did we find a star?
+        let noise_reduction = if cleaned_distance > 0 {
+            best_individual_distance as f32 / cleaned_distance as f32
+        } else {
+            f32::INFINITY
+        };
+
+        if noise_reduction > 1.5 {
+            Some((star, cleaned_distance, noise_reduction))
+        } else {
+            None // no coherent signal emerged
+        }
+    }
+
     // ========================================================================
     // STATISTICS
     // ========================================================================
@@ -3055,5 +3148,33 @@ mod tests {
         let query = BitpackedVector::random(42);
         let result = graph.cascaded_resonance_traverse(a, &query, TWO_SIGMA, 2);
         assert!(result.contains_key(&a), "Source should be in result");
+    }
+
+    #[test]
+    fn test_voyager_deep_field_does_not_panic() {
+        // Voyager deep field search on a small graph.
+        // With random nodes it probably won't find a star,
+        // but it should not panic.
+        let mut graph = DnGraph::new();
+        let a = graph.add_node(PackedDn::new(&[0]), "A");
+        let b = graph.add_node(PackedDn::new(&[1]), "B");
+        let c = graph.add_node(PackedDn::new(&[2]), "C");
+        let d = graph.add_node(PackedDn::new(&[3]), "D");
+
+        let edge = EdgeDescriptor::new(CogVerb::CAUSES, 1.0, 0);
+        graph.add_edge(a, b, edge);
+        graph.add_edge(a, c, edge);
+        graph.add_edge(a, d, edge);
+        graph.flush();
+
+        let query = BitpackedVector::random(42);
+        let result = graph.voyager_resonance(a, &query, 1);
+        // Result may be None (no coherent star from random data)
+        // but should not panic
+        if let Some((star, cleaned_dist, noise_reduction)) = result {
+            assert!(noise_reduction > 1.5);
+            assert!(cleaned_dist > 0);
+            assert!(star.count_ones() > 0);
+        }
     }
 }
