@@ -45,6 +45,7 @@
 
 pub mod width_10k;
 pub mod width_16k;
+pub mod width_32k;
 pub mod bitpack;
 pub mod hamming;
 pub mod resonance;
