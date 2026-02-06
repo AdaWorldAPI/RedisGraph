@@ -84,6 +84,7 @@ pub use slot_encoding::{SlotEncodedNode, SlotKeys, NodeBuilder, StringEncoder};
 pub use dn_sparse::{
     PackedDn, DnGraph, DnNodeStore, DnCsr, DeltaDnMatrix,
     NodeSlot, EdgeDescriptor, hierarchical_fingerprint, xor_bind_fingerprint,
+    DnSemiring, BooleanBfs, HdrPathBind, HammingMinPlus, PageRankSemiring, ResonanceMax,
 };
 #[cfg(feature = "datafusion-storage")]
 pub use storage::{ArrowStore, VectorBatch};

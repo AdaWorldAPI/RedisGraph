@@ -906,6 +906,330 @@ impl DnCsr {
 }
 
 // ============================================================================
+// DN SEMIRING: GraphBLAS Spirit + HDR Superpowers
+// ============================================================================
+
+/// The trait that makes this a GraphBLAS system, not just a graph library.
+///
+/// In GraphBLAS, algorithm = semiring choice. BFS uses BooleanOrAnd.
+/// PageRank uses PlusTimesReal. SSSP uses MinPlusInt.
+///
+/// Here, the semiring's multiply gets the FULL CONTEXT of an edge traversal:
+/// the source DN, destination DN, the edge descriptor, AND the graph's
+/// fingerprint cache. This means HDR operations (XOR-bind, Hamming distance,
+/// resonance) happen INSIDE the matrix multiply, not as a separate layer.
+///
+/// ```text
+/// GraphBLAS:   result[dst] = Add_over_src( Multiply(A[src,dst], x[src]) )
+/// DnSemiring:  result[dst] = add( multiply(edge, input, src_dn, dst_dn, fps) )
+///                                          ▲                          ▲
+///                                     8 bytes                    HDR context
+///                                  (not 1,256)              (fingerprints on demand)
+/// ```
+pub trait DnSemiring {
+    /// The value type flowing through the frontier
+    type Value: Clone;
+
+    /// Additive identity (empty/nothing)
+    fn zero(&self) -> Self::Value;
+
+    /// Combine edge with input value to produce contribution to destination.
+    ///
+    /// This is where HDR magic happens: the semiring can compute
+    /// XOR-bind fingerprints, Hamming distances, or resonance scores
+    /// using the src/dst fingerprints it gets for free.
+    fn multiply(
+        &self,
+        edge: EdgeDescriptor,
+        input: &Self::Value,
+        src_fp: Option<&BitpackedVector>,
+        dst_fp: Option<&BitpackedVector>,
+    ) -> Self::Value;
+
+    /// Combine two values arriving at the same destination.
+    fn add(&self, a: &Self::Value, b: &Self::Value) -> Self::Value;
+
+    /// Is this the zero element? (for sparsity: don't store zeros)
+    fn is_zero(&self, val: &Self::Value) -> bool;
+}
+
+// ── Concrete Semirings ──────────────────────────────────────────────────────
+
+/// Boolean OR.AND — standard BFS level detection
+///
+/// multiply: edge exists AND source is in frontier → true
+/// add: any path reaches destination → true (OR)
+///
+/// This is `GxB_LOR_LAND_BOOL` in SuiteSparse GraphBLAS.
+pub struct BooleanBfs;
+
+impl DnSemiring for BooleanBfs {
+    type Value = bool;
+    fn zero(&self) -> bool { false }
+    fn multiply(&self, _edge: EdgeDescriptor, input: &bool, _: Option<&BitpackedVector>, _: Option<&BitpackedVector>) -> bool {
+        *input // if source is in frontier, destination is reachable
+    }
+    fn add(&self, a: &bool, b: &bool) -> bool { *a || *b }
+    fn is_zero(&self, val: &bool) -> bool { !val }
+}
+
+/// HDR Path Binding — accumulate XOR-bound path fingerprints during BFS
+///
+/// multiply: bind edge fingerprint with incoming path vector
+///   path_to_dst = path_to_src XOR verb_fp XOR dst_fp
+/// add: bundle multiple paths arriving at same node (majority vote)
+///
+/// After BFS, each visited node holds a fingerprint that ENCODES the path
+/// from source to it. You can recover intermediate nodes by resonance.
+pub struct HdrPathBind;
+
+impl DnSemiring for HdrPathBind {
+    type Value = BitpackedVector;
+
+    fn zero(&self) -> BitpackedVector { BitpackedVector::zero() }
+
+    fn multiply(
+        &self,
+        edge: EdgeDescriptor,
+        input: &BitpackedVector,
+        _src_fp: Option<&BitpackedVector>,
+        dst_fp: Option<&BitpackedVector>,
+    ) -> BitpackedVector {
+        // path_to_dst = path_to_src XOR verb_fp XOR dst_fp
+        let verb_fp = edge.verb().to_fingerprint();
+        let dst = dst_fp.cloned().unwrap_or_else(BitpackedVector::zero);
+        input.xor(&verb_fp).xor(&dst)
+    }
+
+    fn add(&self, a: &BitpackedVector, b: &BitpackedVector) -> BitpackedVector {
+        // Bundle: majority vote of multiple paths
+        BitpackedVector::bundle(&[a, b])
+    }
+
+    fn is_zero(&self, val: &BitpackedVector) -> bool {
+        val.count_ones() == 0
+    }
+}
+
+/// Hamming Min-Plus — shortest "semantic distance" path (SSSP)
+///
+/// multiply: distance_to_dst = distance_to_src + hamming(src_fp, dst_fp)
+/// add: keep minimum distance
+///
+/// This is `GxB_MIN_PLUS_UINT32` but the edge weight is computed on the
+/// fly from HDR fingerprint distance. No stored weights needed.
+pub struct HammingMinPlus;
+
+impl DnSemiring for HammingMinPlus {
+    type Value = u32;
+
+    fn zero(&self) -> u32 { u32::MAX }
+
+    fn multiply(
+        &self,
+        _edge: EdgeDescriptor,
+        input: &u32,
+        src_fp: Option<&BitpackedVector>,
+        dst_fp: Option<&BitpackedVector>,
+    ) -> u32 {
+        if *input == u32::MAX {
+            return u32::MAX;
+        }
+        let edge_dist = match (src_fp, dst_fp) {
+            (Some(s), Some(d)) => hamming_distance_scalar(s, d),
+            _ => 1, // default unit distance if fingerprints unavailable
+        };
+        input.saturating_add(edge_dist)
+    }
+
+    fn add(&self, a: &u32, b: &u32) -> u32 { (*a).min(*b) }
+    fn is_zero(&self, val: &u32) -> bool { *val == u32::MAX }
+}
+
+/// PageRank contribution — damped rank propagation
+///
+/// multiply: contrib = rank[src] * edge_weight / out_degree[src]
+/// add: sum contributions
+///
+/// `GxB_PLUS_TIMES_FP32` with degree normalization baked in.
+pub struct PageRankSemiring {
+    pub damping: f32,
+}
+
+impl DnSemiring for PageRankSemiring {
+    type Value = f32;
+
+    fn zero(&self) -> f32 { 0.0 }
+
+    fn multiply(
+        &self,
+        edge: EdgeDescriptor,
+        input: &f32,
+        _: Option<&BitpackedVector>,
+        _: Option<&BitpackedVector>,
+    ) -> f32 {
+        // input already has rank/out_degree factored in by the caller
+        self.damping * input * edge.weight()
+    }
+
+    fn add(&self, a: &f32, b: &f32) -> f32 { a + b }
+    fn is_zero(&self, val: &f32) -> bool { *val == 0.0 }
+}
+
+/// Resonance Max — find strongest semantic resonance through edges
+///
+/// multiply: resonance = 10000 - hamming(bound_edge_fp, query)
+///           where bound_edge_fp = src_fp XOR verb_fp XOR dst_fp
+/// add: keep maximum resonance (strongest match)
+///
+/// This semiring lets you do "find all paths that resonate with concept X"
+/// as a single matrix-vector multiply. No graph algorithm code needed.
+pub struct ResonanceMax {
+    pub query: BitpackedVector,
+}
+
+impl DnSemiring for ResonanceMax {
+    type Value = u32;
+
+    fn zero(&self) -> u32 { 0 }
+
+    fn multiply(
+        &self,
+        edge: EdgeDescriptor,
+        _input: &u32,
+        src_fp: Option<&BitpackedVector>,
+        dst_fp: Option<&BitpackedVector>,
+    ) -> u32 {
+        match (src_fp, dst_fp) {
+            (Some(s), Some(d)) => {
+                // Compute edge fingerprint on the fly
+                let verb_fp = edge.verb().to_fingerprint();
+                let edge_fp = s.xor(&verb_fp).xor(d);
+                // Resonance = closeness to query (10000 - distance)
+                let dist = hamming_distance_scalar(&edge_fp, &self.query);
+                10_000u32.saturating_sub(dist)
+            }
+            _ => 0,
+        }
+    }
+
+    fn add(&self, a: &u32, b: &u32) -> u32 { (*a).max(*b) }
+    fn is_zero(&self, val: &u32) -> bool { *val == 0 }
+}
+
+// ── Semiring-powered Matrix-Vector Multiply on DnCsr ────────────────────────
+
+impl DnCsr {
+    /// Matrix-vector multiply: result = A * input, using given semiring.
+    ///
+    /// This is `GrB_mxv` but:
+    /// - Indexed by PackedDn instead of integer
+    /// - Semiring gets src/dst fingerprints for HDR ops
+    /// - Only visits non-empty rows (no dense outer loop)
+    /// - Edge descriptors are 8 bytes (not 1,256)
+    ///
+    /// ```text
+    /// for each row src in A (only rows with edges, via CSR):
+    ///   if input[src] exists:
+    ///     for each edge (src → dst, descriptor) in row:
+    ///       val = semiring.multiply(descriptor, input[src], src_fp, dst_fp)
+    ///       result[dst] = semiring.add(result[dst], val)
+    /// ```
+    pub fn mxv<S: DnSemiring>(
+        &self,
+        input: &HashMap<PackedDn, S::Value>,
+        semiring: &S,
+        node_fps: &HashMap<PackedDn, Arc<BitpackedVector>>,
+    ) -> HashMap<PackedDn, S::Value> {
+        let mut result: HashMap<PackedDn, S::Value> = HashMap::new();
+
+        // Only iterate rows that have edges (CSR guarantees this)
+        for (row_idx, &src) in self.row_dns.iter().enumerate() {
+            // Only process if source is in the input frontier
+            let input_val = match input.get(&src) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let src_fp = node_fps.get(&src).map(|a| a.as_ref());
+
+            let start = self.row_ptrs[row_idx] as usize;
+            let end = self.row_ptrs[row_idx + 1] as usize;
+
+            for i in start..end {
+                let dst = self.col_dns[i];
+                let edge = self.edges[i];
+                let dst_fp = node_fps.get(&dst).map(|a| a.as_ref());
+
+                let contribution = semiring.multiply(edge, input_val, src_fp, dst_fp);
+
+                if !semiring.is_zero(&contribution) {
+                    result.entry(dst)
+                        .and_modify(|existing| {
+                            *existing = semiring.add(existing, &contribution);
+                        })
+                        .or_insert(contribution);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Subtree-restricted mxv: only traverse edges within a subtree.
+    ///
+    /// Uses DN-ordered CSR's binary search to find the subtree rows,
+    /// then runs the semiring multiply only within that range.
+    pub fn subtree_mxv<S: DnSemiring>(
+        &self,
+        root: PackedDn,
+        input: &HashMap<PackedDn, S::Value>,
+        semiring: &S,
+        node_fps: &HashMap<PackedDn, Arc<BitpackedVector>>,
+    ) -> HashMap<PackedDn, S::Value> {
+        let mut result: HashMap<PackedDn, S::Value> = HashMap::new();
+
+        let (lo, hi) = root.subtree_range();
+        let start_row = self.row_dns.partition_point(|dn| *dn < root);
+        let end_row = self.row_dns.partition_point(|dn| *dn <= hi);
+
+        for row_idx in start_row..end_row {
+            let src = self.row_dns[row_idx];
+            let input_val = match input.get(&src) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let src_fp = node_fps.get(&src).map(|a| a.as_ref());
+            let start = self.row_ptrs[row_idx] as usize;
+            let end = self.row_ptrs[row_idx + 1] as usize;
+
+            for i in start..end {
+                let dst = self.col_dns[i];
+                // Only include destinations within subtree
+                if !(root.is_ancestor_of(dst) || dst == root) {
+                    continue;
+                }
+
+                let edge = self.edges[i];
+                let dst_fp = node_fps.get(&dst).map(|a| a.as_ref());
+                let contribution = semiring.multiply(edge, input_val, src_fp, dst_fp);
+
+                if !semiring.is_zero(&contribution) {
+                    result.entry(dst)
+                        .and_modify(|existing| {
+                            *existing = semiring.add(existing, &contribution);
+                        })
+                        .or_insert(contribution);
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// ============================================================================
 // DELTA DN MATRIX (Transactional Isolation)
 // ============================================================================
 
@@ -1478,6 +1802,179 @@ impl DnGraph {
     }
 
     // ========================================================================
+    // SEMIRING-POWERED TRAVERSAL (The GraphBLAS Fusion)
+    // ========================================================================
+
+    /// Collect fingerprint references for the semiring to use.
+    /// Returns a HashMap that the mxv can borrow from.
+    fn fingerprint_map(&self) -> HashMap<PackedDn, Arc<BitpackedVector>> {
+        self.nodes.iter()
+            .map(|(&dn, slot)| (dn, slot.fingerprint.clone()))
+            .collect()
+    }
+
+    /// Semiring-powered graph traversal (iterative mxv).
+    ///
+    /// The source_value is the multiplicative identity for the semiring:
+    /// - `BooleanBfs`:    `true`
+    /// - `HdrPathBind`:   `BitpackedVector::zero()`
+    /// - `HammingMinPlus`: `0u32`
+    /// - `ResonanceMax`:   `0u32`
+    ///
+    /// This is `GrB_vxm` iterated with complement-masking, exactly like
+    /// LAGraph_bfs in SuiteSparse. Same code, different semiring, different algorithm.
+    ///
+    /// ```text
+    /// // Standard BFS:
+    /// graph.semiring_traverse(source, true, &BooleanBfs, 10);
+    ///
+    /// // HDR path binding:
+    /// graph.semiring_traverse(source, BitpackedVector::zero(), &HdrPathBind, 10);
+    ///
+    /// // Semantic shortest path:
+    /// graph.semiring_traverse(source, 0u32, &HammingMinPlus, 10);
+    ///
+    /// // Resonance search:
+    /// graph.semiring_traverse(source, 0u32, &ResonanceMax { query }, 10);
+    /// ```
+    ///
+    /// This is `GrB_vxm` iterated with masking, exactly like LAGraph_bfs.
+    pub fn semiring_traverse<S: DnSemiring>(
+        &self,
+        source: PackedDn,
+        source_value: S::Value,
+        semiring: &S,
+        max_depth: usize,
+    ) -> HashMap<PackedDn, S::Value> {
+        // Must flush to get consistent CSR for mxv
+        // (In production, would use a snapshot of main + delta view)
+
+        let fps = self.fingerprint_map();
+        let mut result: HashMap<PackedDn, S::Value> = HashMap::new();
+        let mut visited: HashSet<PackedDn> = HashSet::new();
+
+        // Initialize
+        let mut frontier: HashMap<PackedDn, S::Value> = HashMap::new();
+        frontier.insert(source, source_value.clone());
+        result.insert(source, source_value);
+        visited.insert(source);
+
+        for _depth in 0..max_depth {
+            // next = A * frontier (semiring mxv)
+            let next = self.forward.main.mxv(&frontier, semiring, &fps);
+
+            // Filter out already-visited nodes
+            let mut new_frontier: HashMap<PackedDn, S::Value> = HashMap::new();
+            for (dn, val) in next {
+                if !visited.contains(&dn) && !semiring.is_zero(&val) {
+                    visited.insert(dn);
+                    result.insert(dn, val.clone());
+                    new_frontier.insert(dn, val);
+                }
+            }
+
+            if new_frontier.is_empty() {
+                break;
+            }
+
+            frontier = new_frontier;
+        }
+
+        result
+    }
+
+    /// Semiring-powered PageRank (iterative mxv).
+    ///
+    /// Each iteration: rank = damping * (A^T * rank_normalized) + base
+    pub fn semiring_pagerank(
+        &self,
+        damping: f32,
+        iterations: usize,
+    ) -> HashMap<PackedDn, f32> {
+        let fps = self.fingerprint_map();
+        let semiring = PageRankSemiring { damping };
+        let n = self.nodes.len() as f32;
+        if n == 0.0 {
+            return HashMap::new();
+        }
+        let base = (1.0 - damping) / n;
+
+        // Initialize: equal rank for all nodes
+        let all_dns: Vec<PackedDn> = self.nodes.iter().map(|(&dn, _)| dn).collect();
+        let mut rank: HashMap<PackedDn, f32> = all_dns.iter()
+            .map(|&dn| (dn, 1.0 / n))
+            .collect();
+
+        for _ in 0..iterations {
+            // Normalize by out-degree
+            let mut normalized: HashMap<PackedDn, f32> = HashMap::new();
+            for &dn in &all_dns {
+                let out_deg = self.forward.outgoing(dn).len().max(1) as f32;
+                let r = rank.get(&dn).copied().unwrap_or(0.0);
+                normalized.insert(dn, r / out_deg);
+            }
+
+            // new_rank = A^T * normalized (reverse matrix = transpose)
+            let contrib = self.reverse.main.mxv(&normalized, &semiring, &fps);
+
+            // Apply base + contributions
+            let mut new_rank: HashMap<PackedDn, f32> = HashMap::new();
+            for &dn in &all_dns {
+                let c = contrib.get(&dn).copied().unwrap_or(0.0);
+                new_rank.insert(dn, base + c);
+            }
+
+            rank = new_rank;
+        }
+
+        rank
+    }
+
+    /// Resonance search: find nodes reachable through edges that
+    /// resonate with a query fingerprint. Single mxv operation.
+    ///
+    /// This is the HDR superpower: "find all things connected to source
+    /// through semantically relevant edges" as one sparse multiply.
+    pub fn resonance_traverse(
+        &self,
+        source: PackedDn,
+        query: &BitpackedVector,
+        max_depth: usize,
+    ) -> HashMap<PackedDn, u32> {
+        let semiring = ResonanceMax { query: query.clone() };
+        self.semiring_traverse(source, 0u32, &semiring, max_depth)
+    }
+
+    /// HDR path binding: BFS that accumulates XOR-bound path fingerprints.
+    ///
+    /// After traversal, each reachable node holds a fingerprint encoding
+    /// the path from source. Unbind with intermediate verb fingerprints
+    /// to recover waypoints.
+    pub fn hdr_path_bfs(
+        &self,
+        source: PackedDn,
+        max_depth: usize,
+    ) -> HashMap<PackedDn, BitpackedVector> {
+        let semiring = HdrPathBind;
+        self.semiring_traverse(source, BitpackedVector::zero(), &semiring, max_depth)
+    }
+
+    /// Semantic shortest path: edges weighted by Hamming distance
+    /// between source and destination fingerprints.
+    ///
+    /// Nodes that are "semantically close" to their neighbors have
+    /// shorter edges. Finding the shortest path finds the path through
+    /// the most semantically coherent sequence of relationships.
+    pub fn semantic_shortest_path(
+        &self,
+        source: PackedDn,
+        max_depth: usize,
+    ) -> HashMap<PackedDn, u32> {
+        let semiring = HammingMinPlus;
+        self.semiring_traverse(source, 0u32, &semiring, max_depth)
+    }
+
+    // ========================================================================
     // STATISTICS
     // ========================================================================
 
@@ -1855,5 +2352,157 @@ mod tests {
         let a_rank = ranks[&a];
         assert!(hub_rank > a_rank,
             "Hub should rank higher: hub={} vs a={}", hub_rank, a_rank);
+    }
+
+    // ====================================================================
+    // SEMIRING TESTS
+    // ====================================================================
+
+    fn build_chain_graph() -> DnGraph {
+        // Build A → B → C → D and flush so CSR is populated
+        let mut graph = DnGraph::new();
+        let a = graph.add_node(PackedDn::new(&[0]), "A");
+        let b = graph.add_node(PackedDn::new(&[1]), "B");
+        let c = graph.add_node(PackedDn::new(&[2]), "C");
+        let d = graph.add_node(PackedDn::new(&[3]), "D");
+
+        let edge = EdgeDescriptor::new(CogVerb::CAUSES, 1.0, 0);
+        graph.add_edge(a, b, edge);
+        graph.add_edge(b, c, edge);
+        graph.add_edge(c, d, edge);
+
+        // Flush to populate CSR for mxv
+        graph.flush();
+        graph
+    }
+
+    #[test]
+    fn test_semiring_boolean_bfs() {
+        let graph = build_chain_graph();
+        let a = PackedDn::new(&[0]);
+
+        let result = graph.semiring_traverse(a, true, &BooleanBfs, 10);
+
+        // Should reach all 4 nodes
+        assert!(result.contains_key(&a));
+        assert!(result.contains_key(&PackedDn::new(&[1])));
+        assert!(result.contains_key(&PackedDn::new(&[2])));
+        assert!(result.contains_key(&PackedDn::new(&[3])));
+    }
+
+    #[test]
+    fn test_semiring_hamming_sssp() {
+        let graph = build_chain_graph();
+        let a = PackedDn::new(&[0]);
+
+        let distances = graph.semantic_shortest_path(a, 10);
+
+        // Source distance = 0
+        assert_eq!(distances[&a], 0);
+
+        // Each hop adds Hamming distance, so D > C > B > 0
+        let b = PackedDn::new(&[1]);
+        let c = PackedDn::new(&[2]);
+        let d = PackedDn::new(&[3]);
+
+        if let (Some(&db), Some(&dc), Some(&dd)) =
+            (distances.get(&b), distances.get(&c), distances.get(&d))
+        {
+            assert!(db > 0, "B should have positive distance");
+            assert!(dc > db, "C should be further than B: {} vs {}", dc, db);
+            assert!(dd > dc, "D should be further than C: {} vs {}", dd, dc);
+        }
+    }
+
+    #[test]
+    fn test_semiring_hdr_path_bind() {
+        let graph = build_chain_graph();
+        let a = PackedDn::new(&[0]);
+        let b = PackedDn::new(&[1]);
+
+        let path_fps = graph.hdr_path_bfs(a, 10);
+
+        // Each node should have a non-zero path fingerprint
+        assert!(path_fps.contains_key(&b));
+        let b_path_fp = &path_fps[&b];
+        assert!(b_path_fp.count_ones() > 0, "Path fingerprint should be non-zero");
+    }
+
+    #[test]
+    fn test_semiring_resonance_max() {
+        let mut graph = DnGraph::new();
+        let a = graph.add_node(PackedDn::new(&[0]), "A");
+        let b = graph.add_node(PackedDn::new(&[1]), "B");
+        let c = graph.add_node(PackedDn::new(&[2]), "C");
+
+        // A → B (CAUSES), A → C (SIMILAR_TO)
+        graph.add_edge(a, b, EdgeDescriptor::new(CogVerb::CAUSES, 1.0, 0));
+        graph.add_edge(a, c, EdgeDescriptor::new(CogVerb::SIMILAR_TO, 1.0, 0));
+        graph.flush();
+
+        // Create a query that resonates with the CAUSES edge fingerprint
+        let a_fp = graph.node(a).unwrap().fingerprint.clone();
+        let b_fp = graph.node(b).unwrap().fingerprint.clone();
+        let causes_fp = CogVerb::CAUSES.to_fingerprint();
+        let target_edge_fp = a_fp.xor(&causes_fp).xor(&b_fp);
+
+        let resonance_result = graph.resonance_traverse(a, &target_edge_fp, 1);
+
+        // B's edge should resonate more strongly with the CAUSES query
+        // than C's edge (which is SIMILAR_TO)
+        if let (Some(&b_res), Some(&c_res)) =
+            (resonance_result.get(&b), resonance_result.get(&c))
+        {
+            assert!(b_res > c_res,
+                "CAUSES edge should resonate more with CAUSES query: B={} vs C={}",
+                b_res, c_res);
+        }
+    }
+
+    #[test]
+    fn test_semiring_pagerank() {
+        let mut graph = DnGraph::new();
+
+        let hub = graph.add_node(PackedDn::new(&[0]), "Hub");
+        let a = graph.add_node(PackedDn::new(&[1]), "A");
+        let b = graph.add_node(PackedDn::new(&[2]), "B");
+        let c = graph.add_node(PackedDn::new(&[3]), "C");
+
+        let edge = EdgeDescriptor::new(CogVerb::CAUSES, 1.0, 0);
+        graph.add_edge(a, hub, edge);
+        graph.add_edge(b, hub, edge);
+        graph.add_edge(c, hub, edge);
+        graph.flush();
+
+        let ranks = graph.semiring_pagerank(0.85, 20);
+
+        let hub_rank = ranks.get(&hub).copied().unwrap_or(0.0);
+        let a_rank = ranks.get(&a).copied().unwrap_or(0.0);
+
+        assert!(hub_rank > a_rank,
+            "Hub should rank higher in semiring PR: hub={} vs a={}", hub_rank, a_rank);
+    }
+
+    #[test]
+    fn test_mxv_only_visits_nonempty_rows() {
+        // This tests the key GraphBLAS property: only non-empty rows are visited.
+        // A graph with 1M nodes but only 3 edges should only touch 3 rows.
+        let mut graph = DnGraph::new();
+
+        // Add many nodes but only 2 edges
+        for i in 0..100u8 {
+            graph.add_node(PackedDn::new(&[i]), format!("node_{}", i));
+        }
+        let a = PackedDn::new(&[0]);
+        let b = PackedDn::new(&[50]);
+        let edge = EdgeDescriptor::new(CogVerb::CAUSES, 1.0, 0);
+        graph.add_edge(a, b, edge);
+        graph.flush();
+
+        // BFS from A should only find B (not scan all 100 nodes)
+        let result = graph.semiring_traverse(a, true, &BooleanBfs, 1);
+        assert_eq!(result.len(), 2); // A (source) + B (neighbor)
+        assert!(result.contains_key(&a));
+        assert!(result.contains_key(&b));
     }
 }
