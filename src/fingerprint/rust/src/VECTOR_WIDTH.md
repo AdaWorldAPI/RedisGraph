@@ -230,13 +230,39 @@ and array sizes differ.
 src/
 ├── width_10k/
 │   └── mod.rs          # VECTOR_BITS=10000, VECTOR_WORDS=157, σ=50
+│                        # SIMD layout, sample points, block constants
 ├── width_16k/
 │   ├── mod.rs          # VECTOR_BITS=16384, VECTOR_WORDS=256, σ=64
-│   │                    # + schema block offsets
-│   └── schema.rs       # ANI levels, NARS truth/budget, RL inline state,
-│                        # neighbor bloom filter, graph metrics, SchemaSidecar
+│   │                    # Schema block offsets, module declarations
+│   ├── schema.rs       # ANI levels, NARS truth/budget, RL inline state,
+│   │                    # Q-values, STDP, Hebbian weights, DN address,
+│   │                    # neighbor bloom filter, graph metrics, SchemaSidecar
+│   ├── search.rs       # Schema-filtered search: BlockMask, SchemaQuery,
+│   │                    # predicate filters (ANI/NARS/RL/Graph/Kind),
+│   │                    # masked distance, schema-aware bind, NARS inline ops
+│   ├── compat.rs       # 10K ↔ 16K conversions: zero_extend, truncate,
+│   │                    # xor_fold, cross_width_distance, batch migration
+│   ├── xor_bubble.rs   # XorDelta (sparse compressed diff), DeltaChain
+│   │                    # (path compression), XorBubble (incremental centroid),
+│   │                    # XorWriteCache (Arrow CoW avoidance)
+│   └── demo.rs         # Integration tests: 10 scenarios exercising full stack
+│                        # (Cypher, GNN, NARS, DN, XOR cache, search pipeline)
+├── navigator.rs        # Unified API: Cypher procedures (15), DN Redis protocol,
+│                        # GNN message passing, GraphBLAS SpMV, ANN interface
 ├── bitpack.rs          # Uses width_10k constants (current default)
 ├── hamming.rs          # Generic distance computation
 ├── epiphany.rs         # Zone thresholds from σ constants
-└── ...                 # All other modules unchanged
+├── VECTOR_WIDTH.md     # This file: architecture comparison
+└── HARDENING_REVIEW.md # Production readiness audit with honest assessment
 ```
+
+### Test Coverage (85 new tests)
+
+| Module | Tests | What's Covered |
+|--------|-------|----------------|
+| `schema.rs` | 11 | Pack/unpack roundtrips, NARS truth, bloom filter |
+| `search.rs` | 17 | Predicates, masked distance, threshold, pipeline |
+| `compat.rs` | 9 | Zero-extend, truncate, fold, cross-distance, batch |
+| `xor_bubble.rs` | 16 | Delta roundtrip, chain, bubble, write cache |
+| `navigator.rs` | 22 | Bind/unbind, GNN, GraphBLAS, Cypher, DN paths |
+| `demo.rs` | 10 | Full integration scenarios |

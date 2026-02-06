@@ -16,6 +16,8 @@ pub mod schema;
 pub mod search;
 pub mod compat;
 pub mod xor_bubble;
+#[cfg(test)]
+mod demo;
 
 // ============================================================================
 // VECTOR DIMENSIONS

@@ -823,7 +823,7 @@ mod tests {
     #[test]
     fn test_masked_distance_semantic_only() {
         let mut a = vec![0u64; VECTOR_WORDS];
-        let mut b = vec![0u64; VECTOR_WORDS];
+        let b = vec![0u64; VECTOR_WORDS];
 
         // Set bit differences only in semantic region
         a[0] = 0xFFFF;
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn test_masked_distance_with_threshold() {
-        let mut a = vec![0xFFFF_FFFF_FFFF_FFFFu64; VECTOR_WORDS];
+        let a = vec![0xFFFF_FFFF_FFFF_FFFFu64; VECTOR_WORDS];
         let b = vec![0u64; VECTOR_WORDS];
 
         let query = SchemaQuery::new();
