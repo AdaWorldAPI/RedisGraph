@@ -18,6 +18,7 @@
 | 04 | [RACE_CONDITION_PATTERNS.md](04_RACE_CONDITION_PATTERNS.md) | Fix templates for all 9 documented race conditions |
 | 05 | [MIGRATION_STRATEGY.md](05_MIGRATION_STRATEGY.md) | 6-phase additive migration, no breaking changes |
 | 06 | [METADATA_REVIEW.md](06_METADATA_REVIEW.md) | Complete metadata bit layout, DN tree, inline edges, XOR coupling |
+| 07 | [COMPRESSION_AND_RESONANCE.md](07_COMPRESSION_AND_RESONANCE.md) | Dimensional sparsity theorem, per-stripe SIMD, holographic probe search |
 
 ## Origin
 
@@ -31,7 +32,7 @@ engine in `src/fingerprint/rust/`:
 - `navigator.rs` — Cypher procedures, DN addressing, GNN/GraphBLAS
 - `ARCHITECTURAL_INSIGHTS.md` — The "why it clicks" document
 
-**Test results**: 259 tests passing, all new functionality verified.
+**Test results**: 301 tests passing (259 original + 42 width_32k), all functionality verified.
 
 ## How to Use
 
