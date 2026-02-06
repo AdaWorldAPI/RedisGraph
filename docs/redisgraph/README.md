@@ -14,9 +14,10 @@
 | 00 | [PROMPT_FOR_LADYBUG_SESSION.md](00_PROMPT_FOR_LADYBUG_SESSION.md) | Copy-paste prompt to bootstrap a Claude Code session on ladybug-rs |
 | 01 | [THE_256_WORD_SOLUTION.md](01_THE_256_WORD_SOLUTION.md) | The 156/157 word bug, SIMD remainder, metadata fitting, sigma=64 |
 | 02 | [DATAFUSION_NOT_LANCEDB.md](02_DATAFUSION_NOT_LANCEDB.md) | Why extending DataFusion beats rewriting LanceDB |
-| 03 | [CAM_PREFIX_SOLUTION.md](03_CAM_PREFIX_SOLUTION.md) | How the 4096 CAM dictionary maps to schema blocks |
+| 03 | [CAM_PREFIX_SOLUTION.md](03_CAM_PREFIX_SOLUTION.md) | CAM is transport/GEL only; commandlets → classes and methods |
 | 04 | [RACE_CONDITION_PATTERNS.md](04_RACE_CONDITION_PATTERNS.md) | Fix templates for all 9 documented race conditions |
 | 05 | [MIGRATION_STRATEGY.md](05_MIGRATION_STRATEGY.md) | 6-phase additive migration, no breaking changes |
+| 06 | [METADATA_REVIEW.md](06_METADATA_REVIEW.md) | Complete metadata bit layout, DN tree, inline edges, XOR coupling |
 
 ## Origin
 

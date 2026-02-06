@@ -1,13 +1,15 @@
-# The CAM Prefix Fits at 256 Words — No Separate Address Space Needed
+# The 4096 CAM Is a Transport Protocol — Not Storage
 
-> The 4096 CAM (Content-Addressable Methods) operation dictionary is
-> ladybug-rs's most innovative idea and its biggest architectural headache.
-> At 256 words, the headache disappears: CAM operations map directly to
-> schema metadata blocks.
+> The 4096 CAM (Content-Addressable Methods) is ladybug-rs's most innovative
+> idea. The confusion was treating it as a storage problem. It's not. The
+> 4096 is a transport protocol: an opcode that reaches a class and method.
+> The commandlets belong in classes and methods. Only GEL (Graph Execution
+> Language) — the ability to compile programs into graph execution sequences
+> — stays in the CAM as a first-class concern.
 
 ---
 
-## The Problem
+## The Clarification
 
 The CAM dictionary defines 4096 operations across 16 categories:
 
@@ -17,219 +19,235 @@ The CAM dictionary defines 4096 operations across 16 categories:
 0x200-0x2FF: Cypher
 0x300-0x3FF: Hamming/VSA
 0x400-0x4FF: NARS
-...
-0xF00-0xFFF: User-Defined
+0x500-0x5FF: Search
+0x600-0x6FF: Crystal/Temporal
+0x700-0x7FF: NSM Semantic
+0x800-0x8FF: ACT-R Cognitive
+0x900-0x9FF: RL/Decision
+0xA00-0xAFF: Causality
+0xB00-0xBFF: Qualia/Affect
+0xC00-0xCFF: Rung/Abstraction
+0xD00-0xDFF: Meta/Reflection
+0xE00-0xEFF: Learning
+0xF00-0xFFF: User-Defined/Extension
 ```
 
-Each operation has a 12-bit ID (0x000-0xFFF), metadata, and a fingerprint.
-The original design tried to fit this 4096-entry dictionary into the
-"surplus" bits between 10,000 and 16,384. This didn't work because:
+The original design struggled to fit 4096 entries into the surplus bits
+between 10,000 and 16,384. This was the wrong question entirely.
 
-1. 4096 entries × any reasonable per-entry size > 6,384 surplus bits
-2. The operation fingerprint itself is 10K bits — you can't store an
-   operation definition inside the surplus of another fingerprint
-3. The CAM prefix is an *addressing* concept, not a *data* concept
-
-## The Reframe
-
-**The CAM dictionary is not data to store in a fingerprint.** It's a routing
-table that maps operation IDs to execution handlers. It belongs in the
-Surface zone of BindSpace (prefixes 0x00-0x0F, 4,096 addresses).
-
-But the CAM operation's *parameters* — what to filter by, what schema
-predicates to check — these DO map to the schema metadata blocks in a 256-word
-fingerprint.
+**The commandlets are not a storage issue.** They belong in classes and
+methods — `impl TruthValue`, `impl QTable`, `impl Fingerprint16K`,
+`impl CogGraph`. The 4096 CAM transport protocol reaches those methods
+the same way HTTP reaches REST endpoints.
 
 ---
 
-## The Solution: CAM → Schema Query Translation
+## What Stays in the CAM: GEL Only
 
-Each CAM operation, when executed, translates to a `SchemaQuery` that
-leverages the metadata packed in blocks 13-15 of 16K fingerprints.
-
-### Category 0x300: Hamming/VSA Operations
+**GEL (Graph Execution Language)** is the compiler that turns programs into
+sequences of graph operations. GEL is inherently a dispatch concern:
 
 ```
-CAM 0x300: HAMMING.DISTANCE → full 256-word distance
-CAM 0x301: HAMMING.SEMANTIC → blocks 0-12 only (semantic_distance)
-CAM 0x302: HAMMING.BIND     → XOR bind two 256-word fingerprints
-CAM 0x303: HAMMING.UNBIND   → XOR unbind (same as bind, self-inverse)
-CAM 0x304: HAMMING.BUNDLE   → majority vote across N fingerprints
-CAM 0x305: HAMMING.MEXICANHAT → excite/inhibit with sigma=64 thresholds
-CAM 0x306: HAMMING.POPCOUNT → popcount of words 0-207 (semantic)
-CAM 0x307: HAMMING.BLOOM    → check neighbor bloom at words 244-247
+GEL program: "find similar concepts with high confidence, then propagate activation"
+      ↓ compiles to
+Step 1: CAM 0x501 SEARCH.SCHEMA (args: query_fp, predicates: {nars_confidence > 0.7})
+Step 2: CAM 0x410 NARS.DEDUCTION (args: result[0], result[1], query)
+Step 3: CAM 0x900 RL.BEST_ACTION (args: state_fp)
+Step 4: CAM 0x302 HAMMING.BIND (args: action, state)
+      ↓ executes as
+4 method calls on 256-word fingerprints, each reading/writing metadata in-place
 ```
 
-Implementation: each of these is a direct function call on the 256-word
-array. No lookup table. No hash. Just: read the CAM opcode, call the
-corresponding function on the word array.
+GEL stays in the CAM because it IS routing — it compiles a program into
+a sequence of CAM opcodes that reach the right methods in the right order.
 
-### Category 0x400: NARS Operations
-
-```
-CAM 0x400: NARS.DEDUCTION   → read truth from word 210, compute f=f1*f2, c=f*c1*c2
-CAM 0x401: NARS.INDUCTION   → read truth, compute abduced truth
-CAM 0x402: NARS.ABDUCTION   → read truth, compute inducted truth
-CAM 0x403: NARS.REVISION    → combine evidence: weighted average by confidence
-```
-
-Implementation: read NarsTruth from word 210 of both inputs, apply
-NARS formula, write result to word 210 of output. All integer arithmetic
-on the u64 word — no float, no separate column.
-
-### Category 0x500: Search with Schema Predicates
-
-```
-CAM 0x500: SEARCH.ANN        → semantic_distance top-k, no predicates
-CAM 0x501: SEARCH.SCHEMA     → semantic_distance + passes_predicates()
-CAM 0x502: SEARCH.BLOOM      → bloom_accelerated_search() (neighbor bonus)
-CAM 0x503: SEARCH.RL         → rl_guided_search() (Q-value composite)
-CAM 0x504: SEARCH.NARS_TRUST → filter by NARS confidence > threshold
-CAM 0x505: SEARCH.ANI_LEVEL  → filter by ANI reasoning level ≥ min
-CAM 0x506: SEARCH.CLUSTER    → filter by cluster_id in graph metrics
-```
-
-Implementation: each search variant constructs a `SchemaQuery` and calls
-the same underlying search function with different predicates. The schema
-metadata in blocks 13-15 is the predicate target.
-
-### Category 0x900: RL Operations
-
-```
-CAM 0x900: RL.BEST_ACTION   → read Q-values from words 224-225, return argmax
-CAM 0x901: RL.UPDATE_Q      → write new Q-value for action at index
-CAM 0x902: RL.PUSH_REWARD   → push reward to history at words 226-227
-CAM 0x903: RL.TREND         → compute reward trend from words 226-227
-CAM 0x904: RL.ROUTING_SCORE → composite: alpha*distance + (1-alpha)*q_cost
-```
-
-Implementation: direct word read/write at the RL block (words 224-231).
-No external Q-table needed — the policy travels with the fingerprint.
+Everything else — the NARS inference rules, the RL Q-update math, the
+Hamming distance computation — those are **methods on types**, not CAM
+operations. They get called BY the CAM, they don't live IN the CAM.
 
 ---
 
-## The CAM Surface Zone as Router
+## What Changes: Commandlets → Classes and Methods
 
-The 4096 Surface addresses (prefixes 0x00-0x0F) become the CAM dispatch
-table. Each address contains a fingerprint that encodes the operation's
-*signature* — what arguments it takes and what it returns:
-
-```rust
-// Surface address 0x00:0x03 = CAM 0x003 (HAMMING.UNBIND)
-// The fingerprint at this address encodes:
-// - Block 13: ANI level = which cognitive tier this op serves
-// - Block 14: RL Q-value = usage frequency / success rate
-// - Block 15: Graph metrics = how many nodes this op has touched
-
-/// Execute a CAM operation
-pub fn cam_execute(
-    op_id: u16,
-    bind_space: &BindSpace16K,
-    args: &[Addr],
-) -> CamResult {
-    let category = (op_id >> 8) as u8;
-    let operation = (op_id & 0xFF) as u8;
-
-    match category {
-        0x03 => hamming_dispatch(operation, bind_space, args),
-        0x04 => nars_dispatch(operation, bind_space, args),
-        0x05 => search_dispatch(operation, bind_space, args),
-        0x09 => rl_dispatch(operation, bind_space, args),
-        _ => CamResult::Error(format!("Unknown category: 0x{:02X}", category)),
-    }
-}
-
-fn search_dispatch(
-    op: u8,
-    bs: &BindSpace16K,
-    args: &[Addr],
-) -> CamResult {
-    let query_addr = args[0];
-    let query_fp = bs.read(query_addr);
-    let k = 10; // or read from args
-
-    match op {
-        0x00 => { // SEARCH.ANN
-            let query = SchemaQuery::new();
-            let results = query.search(bs.node_slice(), &query_fp, k);
-            CamResult::Many(results.into_iter().map(|r| r.addr).collect())
-        }
-        0x01 => { // SEARCH.SCHEMA
-            let schema_json = /* read from args[1] or operation metadata */;
-            let query = SchemaQuery::from_json(&schema_json);
-            let results = query.search(bs.node_slice(), &query_fp, k);
-            CamResult::Many(results.into_iter().map(|r| r.addr).collect())
-        }
-        0x02 => { // SEARCH.BLOOM
-            let source_id = query_addr.0 as u64;
-            let results = bloom_accelerated_search(
-                bs.node_slice(), &query_fp, source_id, k, 0.3,
-                &SchemaQuery::new(),
-            );
-            CamResult::Many(results.into_iter().map(|r| Addr(r.index as u16)).collect())
-        }
-        _ => CamResult::Error(format!("Unknown search op: 0x{:02X}", op)),
-    }
-}
-```
-
----
-
-## What This Means for cam_ops.rs
-
-The 4,661-line cam_ops.rs doesn't need to grow. It needs to *shrink*:
-
-1. **Remove stubs** — operations that return `Error("not yet implemented")`
-   get replaced with one-line dispatches to search/schema/rl functions
-
-2. **Remove OpResult enum complexity** — most operations return either a
-   fingerprint (the 256-word array) or a scalar read from a schema block.
-   The enum can be simplified.
-
-3. **Remove per-operation fingerprint generation** — the "fingerprint of
-   the operation" concept is useful for content-addressing the operation
-   dictionary, but it doesn't need to be computed at runtime. Pre-compute
-   once, store at the Surface address.
-
-### Before (cam_ops.rs today, ~4600 lines):
+### Before (cam_ops.rs today, ~4,661 lines):
 
 ```rust
 fn execute(&self, op: u16, args: Vec<Fingerprint>) -> OpResult {
     match op {
-        0x300 => OpResult::Scalar(hamming_distance(&args[0], &args[1]) as f64),
-        0x301 => OpResult::Error("HAMMING.BIND not yet implemented".into()),
-        // ... 4000 lines of stubs and partial implementations
+        0x410 => {
+            // ROUTING + IMPLEMENTATION mixed in one match arm
+            if args.len() < 3 {
+                return OpResult::Error("Deduction requires M, P, S".to_string());
+            }
+            let conclusion = args[2].bind(&args[1]);  // Implementation inline
+            OpResult::One(conclusion)
+        }
+        0x430 => {
+            // More implementation inline
+            let revised = bundle_fingerprints(&[args[0].clone(), args[1].clone()]);
+            OpResult::One(revised)
+        }
+        // ... 4000+ lines of this
     }
 }
 ```
 
-### After (~500 lines):
+### After: CAM is pure routing (~200 lines)
 
 ```rust
-fn execute(&self, op: u16, args: Vec<Addr>) -> CamResult {
+// cam_ops.rs: ONLY routing, no implementation
+fn execute(&self, op: u16, bs: &BindSpace16K, args: &[Addr]) -> CamResult {
     let category = (op >> 8) as u8;
+    let operation = (op & 0xFF) as u8;
     match category {
-        0x03 => self.hamming_ops(op & 0xFF, args),  // ~50 lines
-        0x04 => self.nars_ops(op & 0xFF, args),     // ~50 lines
-        0x05 => self.search_ops(op & 0xFF, args),   // ~80 lines
-        0x09 => self.rl_ops(op & 0xFF, args),       // ~50 lines
-        0x0E => self.learning_ops(op & 0xFF, args), // ~50 lines
-        _ => CamResult::Error(format!("Unknown: 0x{:03X}", op)),
+        0x03 => Fingerprint16K::cam_dispatch(operation, bs, args),
+        0x04 => NarsTruth::cam_dispatch(operation, bs, args),
+        0x05 => SchemaSearch::cam_dispatch(operation, bs, args),
+        0x09 => RlPolicy::cam_dispatch(operation, bs, args),
+        0x0B => QualiaField::cam_dispatch(operation, bs, args),
+        0x0C => RungLevel::cam_dispatch(operation, bs, args),
+        0x0E => GelCompiler::cam_dispatch(operation, bs, args),
+        _    => CamResult::Error(format!("Unknown category: 0x{:02X}", category)),
     }
 }
 ```
 
-Each dispatch function delegates to the proven schema/search/rl operations
-that operate on the 256-word fingerprint. The CAM dictionary becomes a thin
-routing layer, not a monolithic 4600-line match statement.
+### Implementation lives in `impl` blocks (separate files)
+
+```rust
+// src/nars/truth_16k.rs
+impl NarsTruth {
+    /// Read truth from word 210 of a 256-word fingerprint
+    pub fn from_word(w: u64) -> Self { ... }
+    pub fn to_word(&self) -> u64 { ... }
+
+    pub fn deduction(fp_m: &[u64; 256], fp_p: &[u64; 256], fp_s: &[u64; 256])
+        -> [u64; 256]
+    {
+        let truth_m = Self::from_word(fp_m[210]);
+        let truth_p = Self::from_word(fp_p[210]);
+        let f = truth_m.frequency * truth_p.frequency;
+        let c = f * truth_m.confidence * truth_p.confidence;
+        let mut result = fp_s.clone();  // Start from subject
+        // Semantic: result = S ⊗ P
+        for i in 0..208 {
+            result[i] = fp_s[i] ^ fp_p[i];
+        }
+        // Metadata: write computed truth to word 210
+        result[210] = Self { frequency: f, confidence: c, ..Default::default() }.to_word();
+        result
+    }
+
+    /// CAM dispatch for category 0x04
+    pub fn cam_dispatch(op: u8, bs: &BindSpace16K, args: &[Addr]) -> CamResult {
+        match op {
+            0x10 => { // DEDUCTION
+                let (m, p, s) = (bs.read(args[0]), bs.read(args[1]), bs.read(args[2]));
+                CamResult::Fingerprint(Self::deduction(&m, &p, &s))
+            }
+            0x30 => { // REVISION
+                let (a, b) = (bs.read(args[0]), bs.read(args[1]));
+                CamResult::Fingerprint(Self::revision(&a, &b))
+            }
+            _ => CamResult::Error(format!("Unknown NARS op: 0x{:02X}", op)),
+        }
+    }
+}
+```
+
+```rust
+// src/graph/gel.rs — GEL IS the CAM-native component
+impl GelCompiler {
+    /// Compile a program description into a GEL execution plan
+    pub fn compile(program: &str) -> GelPlan {
+        // Parse program → sequence of CAM opcodes with argument bindings
+        // This IS the CAM's native function — compiling programs into
+        // graph execution sequences
+    }
+
+    /// Execute a compiled GEL plan
+    pub fn execute(plan: &GelPlan, bs: &mut BindSpace16K) -> Vec<CamResult> {
+        plan.steps.iter().map(|step| {
+            // Each step is a CAM opcode + addresses
+            // GEL manages: sequencing, branching, loops, error handling
+            cam_execute(step.op, bs, &step.args)
+        }).collect()
+    }
+
+    pub fn cam_dispatch(op: u8, bs: &BindSpace16K, args: &[Addr]) -> CamResult {
+        match op {
+            0x00 => { /* GEL.COMPILE */ }
+            0x01 => { /* GEL.EXECUTE */ }
+            0x02 => { /* GEL.STEP */ }
+            0x10 => { /* GEL.BRANCH_IF */ }
+            0x11 => { /* GEL.LOOP */ }
+            0x20 => { /* GEL.BIND_RESULT */ }
+            _ => CamResult::Error(format!("Unknown GEL op: 0x{:02X}", op)),
+        }
+    }
+}
+```
+
+---
+
+## The CAM Operates ON Metadata, Not WITH Metadata
+
+At 256 words, each method called by the CAM reads and writes metadata
+directly in the fingerprint's word array:
+
+| CAM Category | Method Target | Reads Words | Writes Words |
+|-------------|---------------|-------------|--------------|
+| 0x03 Hamming | `Fingerprint16K` | 0-207 (semantic) | 0-207 |
+| 0x04 NARS | `NarsTruth` | 210 (truth) | 210 |
+| 0x05 Search | `SchemaSearch` | 208-255 (predicates) | — (read-only) |
+| 0x09 RL | `RlPolicy` | 224-231 (Q-values) | 224-231 |
+| 0x0B Qualia | `QualiaField` | 212-213 | 212-213 |
+| 0x0C Rung | `RungLevel` | 216 bits[24-31] | 216 bits[24-31] |
+| 0x0E GEL | `GelCompiler` | 214 (exec state) | 214 |
+
+The method receives the 256-word fingerprint. It reads the words it needs.
+It writes the words it changes. It returns the fingerprint. The CAM never
+touches the fingerprint — it just routes to the method that does.
+
+**This is why the commandlets don't belong in the CAM.** `NARS.DEDUCTION`
+is not a CAM operation — it's `NarsTruth::deduction()`. The CAM routes
+opcode 0x410 to that method. The method reads word 210, does arithmetic,
+writes word 210. The CAM is the phone system. The methods are the people
+who answer.
+
+---
+
+## What cam_ops.rs Becomes
+
+| Before | After |
+|--------|-------|
+| 4,661 lines | ~200 lines routing + ~60 lines GEL compiler |
+| 16 match arm blocks with inline implementations | 16 one-line dispatches to `::cam_dispatch()` |
+| `OpResult` enum with 8 variants | `CamResult` enum with 3 variants (Fingerprint, Scalar, Error) |
+| Operations compute results inline | Methods on types compute results |
+| Fingerprints passed by value | Addresses passed, BindSpace provides fingerprints |
+| Stubs for unimplemented operations | No stubs needed — method doesn't exist yet = no route |
+
+The remaining ~4,400 lines move to where they belong:
+
+- `src/nars/truth_16k.rs` — NARS inference on word 210
+- `src/rl/policy_16k.rs` — RL operations on words 224-231
+- `src/search/schema_search.rs` — Schema-predicate search on words 208-255
+- `src/cognitive/qualia_16k.rs` — Qualia operations on words 212-213
+- `src/cognitive/rung_16k.rs` — Rung operations on word 216
+- `src/graph/gel.rs` — GEL compilation and execution (stays CAM-native)
+- `src/graph/edges_16k.rs` — Inline edge operations on words 219-243
 
 ---
 
 ## The Key Insight
 
-The CAM prefix was never a data-fitting problem. It was a routing problem.
-The operations don't need to *live inside* the fingerprint surplus — they
-need to *operate on* the fingerprint's schema blocks.
+The CAM prefix was never a fitting problem. It was a separation-of-concerns
+problem. The 4096 opcodes are an addressing scheme — a transport protocol
+that reaches methods. The methods are implementations on types. GEL is the
+one CAM-native concept: it compiles programs INTO CAM opcode sequences.
 
-At 256 words, the schema blocks exist. The operations have targets. The
-routing is trivial. The fitting problem dissolves.
+Remove the commandlet implementations from cam_ops.rs. Move them to `impl`
+blocks. Keep the routing. Keep GEL. The 4,661-line file becomes 260 lines
+and every operation gains access to the full 256-word fingerprint with all
+its metadata.

@@ -44,15 +44,16 @@ The vendor directory already has Lance 2.1 source. The right path is:
 
 Read docs/redisgraph/02_DATAFUSION_NOT_LANCEDB.md for the 3-layer architecture.
 
-### 3. The 4096 CAM Prefix Fits Naturally at 256 Words
+### 3. The 4096 CAM Is Transport, Not Storage — Keep Only GEL
 
-The CAM operation dictionary (0x000-0xFFF) maps directly to schema metadata
-blocks in 16K vectors. The operation fingerprint IS the schema query:
-- CAM category → Block 13 ANI level filter
-- CAM operation → Block 14 Q-value / RL action
-- CAM arguments → Schema predicates passed to search
+The 4096 CAM commandlets are NOT a storage problem. They belong in classes and
+methods (impl TruthValue, impl QTable, impl Fingerprint16K). The 4096 transport
+protocol reaches those methods like HTTP reaches REST endpoints. Remove all
+commandlet implementations from cam_ops.rs (4,661 → ~200 lines of pure routing).
+Only GEL (Graph Execution Language) stays in the CAM as a first-class concept —
+it compiles programs into graph execution sequences.
 
-Read docs/redisgraph/03_CAM_PREFIX_SOLUTION.md for how this works.
+Read docs/redisgraph/03_CAM_PREFIX_SOLUTION.md for the full architecture.
 
 ### 4. Race Conditions Have Known Fixes
 
@@ -62,7 +63,20 @@ owned return values) solves most of them.
 
 Read docs/redisgraph/04_RACE_CONDITION_PATTERNS.md for the fix templates.
 
-### 5. Don't Overwrite Anything — Additive Changes Only
+### 5. Metadata Must Move INTO the Fingerprint
+
+BindNode and CogValue store metadata as native Rust struct fields (label,
+qualia, truth, access_count, parent, depth, rung, sigma). At 256 words, ALL
+of this moves into the fingerprint as bit-packed words. This enables:
+- Partial updates via XOR delta (no more "one value blocks all")
+- Inline predicate filtering during HDR cascade search
+- 16-32 inline edge slots per node (sparse adjacency in-fingerprint)
+- XOR parent-child compression for DN tree storage
+- Overflow to Lance tables for hub nodes with >32 edges
+
+Read docs/redisgraph/06_METADATA_REVIEW.md for the complete bit layout.
+
+### 6. Don't Overwrite Anything — Additive Changes Only
 
 Create new files alongside existing ones. The migration from 156-word to 256-word
 should be a separate module (width_16k/) that coexists with the current code.
@@ -82,11 +96,14 @@ proven, tested solutions from a working implementation — not speculation.
    *why* 256 words, not just *that* 256 words
 2. **Prevents the LanceDB trap** — Explicitly redirects to DataFusion
    extensions, which is where the leverage actually is
-3. **Solves the CAM fitting problem** — Shows that 4096 CAM ops map to
-   schema metadata blocks, eliminating the "where do we put them" question
+3. **Solves the CAM confusion** — CAM is transport (routing to methods),
+   not storage. Only GEL stays in the CAM. cam_ops.rs shrinks from 4,661
+   to ~260 lines.
 4. **Provides fix templates** — Not just "fix the race conditions" but
    exact code patterns proven in another codebase
 5. **Protects existing work** — Additive migration, no overwrites
+6. **Maps every metadata field** — Complete bit layout for DN tree, edges,
+   NARS, RL, qualia, GEL, kernel, bloom, graph metrics at 256 words
 
 ## Prerequisite
 
