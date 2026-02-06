@@ -895,3 +895,159 @@ horizontal table ONLY for the fields that genuinely don't fit:
 
 Everything else stays in the fingerprint. The XOR write cache serves both
 dimensions. DataFusion queries both through the same TableProvider.
+
+---
+
+## Alternative Design: 3D Holographic Memory (32K = 2^15)
+
+The most radical alternative. Instead of a 1D 256-word vector, use three
+8K-bit vectors (X, Y, Z) that create a 3-dimensional holographic memory
+through XOR superposition.
+
+### The Structure: 512 Words (32,768 bits = 2^15)
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  512 words = 32K bits = 4KB per fingerprint                           │
+├────────────────────────────────────────────────────────────────────────┤
+│  X dimension: words 0-127    (8K bits, 128 words) — CONTENT / WHAT    │
+│  Y dimension: words 128-255  (8K bits, 128 words) — CONTEXT / WHERE   │
+│  Z dimension: words 256-383  (8K bits, 128 words) — RELATION / HOW    │
+│  Metadata:    words 384-511  (8K bits, 128 words) — everything else   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Is Holographic
+
+In VSA/HDR algebra, `bind(a, b) = a ⊕ b` creates a compound representation.
+With three 8K vectors, the XOR-bound product space is:
+
+```
+8,192 × 8,192 × 8,192 = 549,755,813,888 ≈ 512 billion
+```
+
+A single 32K-bit vector encodes a holographic memory with **512 billion
+addressable data points**. You don't store 512 billion records — you ENCODE
+them through the combinatorial power of XOR binding across three orthogonal
+dimensions.
+
+### How It Works: XYZ Superposition
+
+```rust
+// Store: bind content × context × relation into a single holographic trace
+let trace = x_content ^ y_context ^ z_relation;
+
+// Retrieve: probe with any two dimensions to recover the third
+let recovered_relation = trace ^ x_content ^ y_context;
+// recovered_relation ≈ z_relation (with noise from other stored traces)
+
+let recovered_content = trace ^ y_context ^ z_relation;
+// recovered_content ≈ x_content
+
+let recovered_context = trace ^ x_content ^ z_relation;
+// recovered_context ≈ y_context
+```
+
+This is the holographic property: given any two of three components,
+XOR recovers the third. Multiple traces can be superposed (majority-vote
+bundled) and individual associations recovered by probing.
+
+### What Each Dimension Carries
+
+**X (Content/What)**: The semantic identity of the concept. What it IS.
+Equivalent to the current 10K fingerprint's semantic content, but at 8K.
+
+**Y (Context/Where)**: The situational context. Where/when it appears.
+Enables queries like "what concepts appear in THIS context?" by probing
+`Y_context ⊕ stored_trace` to recover X.
+
+**Z (Relation/How)**: The relational structure. How it connects.
+Encodes the verb/edge type. Probing `X_subject ⊕ Z_verb` recovers Y
+(the object in the relation subject→verb→object).
+
+### The 128-Word Metadata Block
+
+With 128 words (8,192 bits = 1,024 bytes) for metadata, there is
+abundant room:
+
+```
+METADATA BLOCK (words 384-511, 8,192 bits)
+├── Words 384-387:  ANI/consciousness (4 words = 256 bits, full 7-layer state)
+├── Words 388-389:  NARS truth (2 words = frequency + confidence + evidence + horizon)
+├── Words 390-391:  Qualia (2 words = top 8 channels at u16)
+├── Word  392:      GEL execution state
+├── Word  393:      Semantic kernel state
+├── Words 394-396:  DN tree (parent, depth, rung, sigma, type, flags, timestamps)
+├── Words 397-412:  Inline edges: 64 edges (4 per word × 16 words)
+├── Words 413-414:  Edge overflow metadata (count, flag, table addr, degrees)
+├── Word  415:      Schema version + dimensional flags
+├── Words 416-423:  RL/Decision (8 words, same as 256-word layout)
+├── Words 424-431:  Bloom filter (8 words = 512-bit bloom, better FP rate)
+├── Words 432-447:  Graph metrics (16 words, room for all metrics at full precision)
+├── Words 448-463:  Qualia overflow (full 18D at f32: 18 × 32 bits = 9 words)
+├── Words 464-479:  7-Layer markers (full LayerMarker state, 16 words)
+├── Words 480-495:  Rung history (last 8 shift events condensed)
+├── Words 496-510:  Reserved for future use
+└── Word  511:      Checksum + version flags
+```
+
+**64 inline edges** (vs 16-32 at 256 words). The overflow threshold
+moves from "hub nodes with >32 edges" to "only extreme hubs with >64 edges."
+The metadata block alone is larger than the entire current BindNode struct.
+
+### The Trade-offs
+
+**Gains**:
+- 512 billion XOR-addressable data points in one 4KB record
+- Per-dimension queries: similar content in different context, or same
+  relation applied to different content
+- 128 words of metadata: room for EVERYTHING at full precision, no
+  quantization compromises, 64 inline edges
+- Holographic retrieval: given 2 of 3 dimensions, recover the third
+- XOR delta works per-dimension: update content without touching context
+
+**Costs**:
+- 4KB per fingerprint instead of 2KB (256 words) or 1.25KB (156 words)
+- 65K addresses × 4KB = 256MB base store (vs 128MB at 256 words)
+- sigma per 8K dimension = sqrt(8192/4) = 45.25 (not a clean integer;
+  sigma=64 at 16K is cleaner for threshold math)
+- SIMD: 128 words / 8 = 16 AVX-512 iterations per dimension (clean,
+  zero remainder, but 48 iterations total vs 32 for 256 words)
+- Existing HDR cascade search needs adaptation for per-dimension distance
+- The XOR holographic encoding has noise that scales with the number of
+  stored traces — capacity is O(sqrt(8192)) ≈ 90 high-fidelity traces
+  per superposition before retrieval degrades
+
+### When 3D Holographic Makes Sense
+
+- **Relational reasoning**: "what relates to X the way Y relates to Z?"
+  is a single XOR probe, not a graph traversal
+- **Analogical transfer**: `king ⊕ male ⊕ female ≈ queen` works natively
+  in XYZ space — content dimension shifts while relation holds
+- **Context switching**: Same concept in different contexts creates different
+  traces. Probing by context recovers context-appropriate meaning.
+- **Massive implicit storage**: 512 billion data points in 4KB is a
+  compression ratio that no columnar store can match for holographic data
+
+### When 256 Words Is Better
+
+- **Pure ANN search**: You just need distance and predicates, not
+  dimensional decomposition
+- **Memory-constrained**: 2KB per fingerprint is half the cost
+- **Clean sigma**: sigma=64 is more elegant for threshold computation
+- **Simpler implementation**: No dimensional algebra, just flat word array
+- **Tested and proven**: The 256-word layout has 259 passing tests today
+
+### The Path Between: Start 256, Graduate to 512
+
+The 256-word implementation is the foundation. The 512-word 3D layout is
+the evolution. The migration path:
+
+1. Build and ship on 256 words (docs 01-06 cover this completely)
+2. Validate the metadata layout and inline edges in production
+3. When relational reasoning demands it, extend to 512 words:
+   - Words 0-207 become X dimension (content)
+   - Add Y dimension (context) at words 128-255 of the new layout
+   - Add Z dimension (relation) at words 256-383
+   - Move metadata to words 384-511 (128 words, 3× more room)
+4. The compat layer (zero-extend 256→512) is the same pattern as 156→256
