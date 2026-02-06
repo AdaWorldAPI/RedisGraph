@@ -21,7 +21,7 @@
 //!          → ~1 cycle per 64 bits with AVX-512
 //! ```
 
-use crate::bitpack::{BitpackedVector, VECTOR_WORDS, VECTOR_BITS};
+use crate::bitpack::{BitpackedVector, VectorRef, VECTOR_WORDS, VECTOR_BITS};
 use std::cmp::Ordering;
 
 /// Strategic sample points for quick distance estimation
@@ -128,6 +128,73 @@ impl StackedPopcount {
     }
 }
 
+impl StackedPopcount {
+    // ========================================================================
+    // ZERO-COPY variants (operate on VectorRef — no BitpackedVector needed)
+    // ========================================================================
+
+    /// Compute stacked popcount between any two VectorRef implementors.
+    ///
+    /// This is the zero-copy path: when a and b are `VectorSlice`s pointing
+    /// into Arrow buffers, no bytes are ever copied.
+    #[inline]
+    pub fn compute_ref(a: &dyn VectorRef, b: &dyn VectorRef) -> Self {
+        let mut per_word = [0u8; VECTOR_WORDS];
+        let mut cumulative = [0u16; VECTOR_WORDS];
+        let mut running_sum = 0u32;
+
+        let aw = a.words();
+        let bw = b.words();
+
+        for i in 0..VECTOR_WORDS {
+            let xor = aw[i] ^ bw[i];
+            let count = xor.count_ones() as u8;
+            per_word[i] = count;
+            running_sum += count as u32;
+            cumulative[i] = running_sum as u16;
+        }
+
+        Self {
+            per_word,
+            cumulative,
+            total: running_sum,
+        }
+    }
+
+    /// Compute with early termination on any VectorRef pair (zero-copy).
+    #[inline]
+    pub fn compute_with_threshold_ref(
+        a: &dyn VectorRef,
+        b: &dyn VectorRef,
+        threshold: u32,
+    ) -> Option<Self> {
+        let mut per_word = [0u8; VECTOR_WORDS];
+        let mut cumulative = [0u16; VECTOR_WORDS];
+        let mut running_sum = 0u32;
+
+        let aw = a.words();
+        let bw = b.words();
+
+        for i in 0..VECTOR_WORDS {
+            let xor = aw[i] ^ bw[i];
+            let count = xor.count_ones() as u8;
+            per_word[i] = count;
+            running_sum += count as u32;
+            cumulative[i] = running_sum as u16;
+
+            if running_sum > threshold {
+                return None;
+            }
+        }
+
+        Some(Self {
+            per_word,
+            cumulative,
+            total: running_sum,
+        })
+    }
+}
+
 // ============================================================================
 // BELICHTUNGSMESSER (Quick Exposure Meter)
 // ============================================================================
@@ -159,6 +226,27 @@ impl Belichtung {
         }
 
         // For binary samples: SD = sqrt(p(1-p) * n)
+        let p = sum as f32 / 7.0;
+        let variance = p * (1.0 - p);
+        let sd = (variance * 7.0).sqrt();
+
+        Self {
+            mean: sum as u8,
+            sd_100: (sd * 100.0) as u8,
+        }
+    }
+
+    /// Zero-copy meter: works on any VectorRef (VectorSlice from Arrow buffers).
+    #[inline]
+    pub fn meter_ref(a: &dyn VectorRef, b: &dyn VectorRef) -> Self {
+        let aw = a.words();
+        let bw = b.words();
+        let mut sum = 0u32;
+
+        for &idx in &SAMPLE_POINTS {
+            sum += ((aw[idx] ^ bw[idx]) != 0) as u32;
+        }
+
         let p = sum as f32 / 7.0;
         let variance = p * (1.0 - p);
         let sd = (variance * 7.0).sqrt();
@@ -369,6 +457,18 @@ pub fn hamming_distance_scalar(a: &BitpackedVector, b: &BitpackedVector) -> u32 
         dist += (a_words[i] ^ b_words[i]).count_ones();
     }
 
+    dist
+}
+
+/// Zero-copy Hamming distance on any VectorRef pair
+#[inline]
+pub fn hamming_distance_ref(a: &dyn VectorRef, b: &dyn VectorRef) -> u32 {
+    let aw = a.words();
+    let bw = b.words();
+    let mut dist = 0u32;
+    for i in 0..VECTOR_WORDS {
+        dist += (aw[i] ^ bw[i]).count_ones();
+    }
     dist
 }
 

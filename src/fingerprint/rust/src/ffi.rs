@@ -45,7 +45,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::slice;
 
-use crate::bitpack::{BitpackedVector, VECTOR_BYTES, VECTOR_WORDS, VECTOR_BITS};
+use crate::bitpack::{BitpackedVector, VECTOR_BYTES, VECTOR_WORDS, VECTOR_BITS, PADDED_VECTOR_BYTES};
 use crate::hamming::{hamming_distance_scalar, hamming_to_similarity, StackedPopcount, Belichtung};
 use crate::hdr_cascade::{HdrCascade, MexicanHat, SearchResult};
 use crate::resonance::{VectorField, Resonator, BoundEdge};
@@ -745,6 +745,12 @@ pub extern "C" fn hdr_vector_bytes() -> usize {
 #[no_mangle]
 pub extern "C" fn hdr_vector_words() -> usize {
     VECTOR_WORDS
+}
+
+/// Get padded vector size in bytes (64-byte aligned for Arrow zero-copy)
+#[no_mangle]
+pub extern "C" fn hdr_vector_padded_bytes() -> usize {
+    PADDED_VECTOR_BYTES
 }
 
 #[cfg(test)]

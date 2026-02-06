@@ -57,6 +57,7 @@ pub mod crystal_dejavu;
 pub mod slot_encoding;
 pub mod storage_transport;
 pub mod dn_sparse;
+pub mod navigator;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
 #[cfg(feature = "datafusion-storage")]
@@ -65,8 +66,13 @@ pub mod query;
 pub mod ffi;
 
 // Re-exports
-pub use bitpack::{BitpackedVector, VECTOR_BITS, VECTOR_WORDS};
-pub use hamming::{HammingEngine, StackedPopcount};
+pub use bitpack::{
+    BitpackedVector, VectorRef, VectorSlice,
+    VECTOR_BITS, VECTOR_WORDS, VECTOR_BYTES,
+    PADDED_VECTOR_BYTES, PADDED_VECTOR_WORDS,
+    xor_ref,
+};
+pub use hamming::{HammingEngine, StackedPopcount, hamming_distance_ref};
 pub use resonance::{VectorField, Resonator, BoundEdge};
 pub use hdr_cascade::{HdrCascade, MexicanHat, SearchResult};
 pub use graphblas::{GrBMatrix, GrBVector, HdrSemiring, Semiring};
@@ -87,8 +93,11 @@ pub use dn_sparse::{
     DnSemiring, BooleanBfs, HdrPathBind, HammingMinPlus, PageRankSemiring, ResonanceMax,
     CascadedHammingMinPlus, CascadedResonanceMax,
 };
+pub use navigator::{Navigator, NavResult, CypherArg, CypherYield};
 #[cfg(feature = "datafusion-storage")]
-pub use storage::{ArrowStore, VectorBatch};
+pub use navigator::ZeroCopyCursor;
+#[cfg(feature = "datafusion-storage")]
+pub use storage::{ArrowStore, VectorBatch, ArrowBatchSearch, BatchSearchResult};
 
 /// Error types for HDR operations
 #[derive(Debug, thiserror::Error)]

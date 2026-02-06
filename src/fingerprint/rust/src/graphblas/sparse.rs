@@ -11,7 +11,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::bitpack::{BitpackedVector, VECTOR_BYTES};
+use crate::bitpack::{BitpackedVector, VECTOR_BYTES, PADDED_VECTOR_BYTES};
 use crate::{HdrError, Result};
 use super::types::{GrBIndex, HdrScalar};
 
@@ -210,17 +210,17 @@ impl CooStorage {
     pub fn to_arrow(&self) -> Result<RecordBatch> {
         let mut row_builder = UInt64Builder::with_capacity(self.nnz());
         let mut col_builder = UInt64Builder::with_capacity(self.nnz());
-        let mut val_builder = FixedSizeBinaryBuilder::with_capacity(self.nnz(), VECTOR_BYTES as i32);
+        let mut val_builder = FixedSizeBinaryBuilder::with_capacity(self.nnz(), PADDED_VECTOR_BYTES as i32);
 
         for i in 0..self.nnz() {
             row_builder.append_value(self.rows[i]);
             col_builder.append_value(self.cols[i]);
 
             if let HdrScalar::Vector(v) = &self.values[i] {
-                val_builder.append_value(&v.to_bytes())
+                val_builder.append_value(&v.to_padded_bytes())
                     .map_err(|e| HdrError::Storage(e.to_string()))?;
             } else {
-                val_builder.append_value(&vec![0u8; VECTOR_BYTES])
+                val_builder.append_value(&vec![0u8; PADDED_VECTOR_BYTES])
                     .map_err(|e| HdrError::Storage(e.to_string()))?;
             }
         }
@@ -228,7 +228,7 @@ impl CooStorage {
         let schema = Arc::new(Schema::new(vec![
             Field::new("row", DataType::UInt64, false),
             Field::new("col", DataType::UInt64, false),
-            Field::new("value", DataType::FixedSizeBinary(VECTOR_BYTES as i32), false),
+            Field::new("value", DataType::FixedSizeBinary(PADDED_VECTOR_BYTES as i32), false),
         ]));
 
         RecordBatch::try_new(
@@ -264,7 +264,12 @@ impl CooStorage {
             let row = rows.value(i);
             let col = cols.value(i);
             let bytes = values.value(i);
-            let vec = BitpackedVector::from_bytes(bytes)?;
+            // Handle both padded (1280) and unpadded (1256) Arrow columns
+            let vec = if bytes.len() >= PADDED_VECTOR_BYTES {
+                BitpackedVector::from_padded_bytes(bytes)?
+            } else {
+                BitpackedVector::from_bytes(bytes)?
+            };
             coo.add_vector(row, col, vec);
         }
 
