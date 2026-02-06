@@ -1,8 +1,9 @@
 [package]
 name = "hdr-hamming"
-version = "0.1.0"
-edition = "2021"
-description = "Bitpacked HDR Hamming distance with Arrow DataFusion storage"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Bitpacked HDR Hamming distance with Arrow DataFusion storage and LanceDB vector search"
 license = "AGPL-3.0"
 authors = ["RedisGraph Contributors"]
 
@@ -13,23 +14,38 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = ["simd", "datafusion-storage"]
 simd = []
+parallel = ["rayon"]
 datafusion-storage = ["dep:datafusion", "dep:arrow", "dep:tokio"]
+lancedb = ["dep:lance"]
 ffi = []
+full = ["simd", "parallel", "datafusion-storage", "lancedb", "ffi"]
 
 [dependencies]
-# Arrow ecosystem for storage
-arrow = { version = "53", features = ["ffi"] }
-datafusion = { version = "43", optional = true }
-tokio = { version = "1.41", features = ["rt-multi-thread", "macros"], optional = true }
+# Arrow ecosystem for columnar storage (v57 — aligned with DataFusion 51 / lance)
+# 10Kbit vectors = 1250 bytes payload (157 u64 words, last word 16 bits used)
+# Arrow stores these as FixedSizeBinary(1256) with zero-copy access
+arrow = { version = "57", features = ["ffi"], optional = true }
+arrow-array = "57"
+arrow-schema = "57"
+arrow-buffer = "57"
+
+# Query engine — DataFusion 51 (52 pending liblzma conflict per ladybug-rs)
+datafusion = { version = "51", optional = true }
+
+# Lance columnar format — 100x faster random access than Parquet
+# Optional: enables LanceDB vector search backend for fingerprint storage
+# Lance 2.1.0-beta aligns with Arrow 57 / DataFusion 51
+lance = { version = "2.1.0-beta.0", optional = true, default-features = false }
 
 # Async runtime
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros"], optional = true }
 futures = "0.3"
 
 # Error handling
 thiserror = "2.0"
 
 # Parallel processing
-rayon = "1.10"
+rayon = { version = "1.10", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -42,6 +58,7 @@ log = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 tempfile = "3.14"
+tokio = { version = "1.49", features = ["full"] }
 
 [[bench]]
 name = "hamming_bench"

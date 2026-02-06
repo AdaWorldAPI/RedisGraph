@@ -60,7 +60,7 @@ impl CypherTranspiler {
         sql.push_str(" FROM nodes");
 
         // WHERE clause with vector operations
-        if let Some(ref where_clause) = ast.where_clause {
+        if let Some(where_clause) = &ast.where_clause {
             sql.push_str(" WHERE ");
             // Convert predicates to SQL
         }

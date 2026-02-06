@@ -424,33 +424,35 @@ mod simd_x86 {
     pub unsafe fn hamming_distance_avx512(a: &BitpackedVector, b: &BitpackedVector) -> u32 {
         use std::arch::x86_64::*;
 
-        let a_words = a.words();
-        let b_words = b.words();
-        let mut total = _mm512_setzero_si512();
+        unsafe {
+            let a_words = a.words();
+            let b_words = b.words();
+            let mut total = _mm512_setzero_si512();
 
-        // Process 8 u64s at a time (512 bits)
-        let chunks = VECTOR_WORDS / 8;
-        for i in 0..chunks {
-            let offset = i * 8;
-            let va = _mm512_loadu_si512(a_words.as_ptr().add(offset) as *const __m512i);
-            let vb = _mm512_loadu_si512(b_words.as_ptr().add(offset) as *const __m512i);
-            let xor = _mm512_xor_si512(va, vb);
-            let pop = _mm512_popcnt_epi64(xor);
-            total = _mm512_add_epi64(total, pop);
+            // Process 8 u64s at a time (512 bits)
+            let chunks = VECTOR_WORDS / 8;
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm512_loadu_si512(a_words.as_ptr().add(offset) as *const __m512i);
+                let vb = _mm512_loadu_si512(b_words.as_ptr().add(offset) as *const __m512i);
+                let xor = _mm512_xor_si512(va, vb);
+                let pop = _mm512_popcnt_epi64(xor);
+                total = _mm512_add_epi64(total, pop);
+            }
+
+            // Horizontal sum
+            let mut lanes = [0u64; 8];
+            _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, total);
+            let simd_sum: u64 = lanes.iter().sum();
+
+            // Handle remainder (157 % 8 = 5 words)
+            let mut remainder = 0u32;
+            for i in (chunks * 8)..VECTOR_WORDS {
+                remainder += (a_words[i] ^ b_words[i]).count_ones();
+            }
+
+            (simd_sum as u32) + remainder
         }
-
-        // Horizontal sum
-        let mut lanes = [0u64; 8];
-        _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, total);
-        let simd_sum: u64 = lanes.iter().sum();
-
-        // Handle remainder (157 % 8 = 5 words)
-        let mut remainder = 0u32;
-        for i in (chunks * 8)..VECTOR_WORDS {
-            remainder += (a_words[i] ^ b_words[i]).count_ones();
-        }
-
-        (simd_sum as u32) + remainder
     }
 
     /// AVX2 accelerated Hamming distance using lookup table
@@ -459,50 +461,52 @@ mod simd_x86 {
     pub unsafe fn hamming_distance_avx2(a: &BitpackedVector, b: &BitpackedVector) -> u32 {
         use std::arch::x86_64::*;
 
-        let a_words = a.words();
-        let b_words = b.words();
+        unsafe {
+            let a_words = a.words();
+            let b_words = b.words();
 
-        // 4-bit lookup table for popcount
-        let lookup = _mm256_setr_epi8(
-            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
-            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
-        );
-        let low_mask = _mm256_set1_epi8(0x0f);
+            // 4-bit lookup table for popcount
+            let lookup = _mm256_setr_epi8(
+                0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+                0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+            );
+            let low_mask = _mm256_set1_epi8(0x0f);
 
-        let mut total = _mm256_setzero_si256();
+            let mut total = _mm256_setzero_si256();
 
-        // Process 4 u64s at a time (256 bits)
-        let chunks = VECTOR_WORDS / 4;
-        for i in 0..chunks {
-            let offset = i * 4;
-            let va = _mm256_loadu_si256(a_words.as_ptr().add(offset) as *const __m256i);
-            let vb = _mm256_loadu_si256(b_words.as_ptr().add(offset) as *const __m256i);
-            let xor = _mm256_xor_si256(va, vb);
+            // Process 4 u64s at a time (256 bits)
+            let chunks = VECTOR_WORDS / 4;
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = _mm256_loadu_si256(a_words.as_ptr().add(offset) as *const __m256i);
+                let vb = _mm256_loadu_si256(b_words.as_ptr().add(offset) as *const __m256i);
+                let xor = _mm256_xor_si256(va, vb);
 
-            // Popcount using nibble lookup
-            let lo = _mm256_and_si256(xor, low_mask);
-            let hi = _mm256_and_si256(_mm256_srli_epi16(xor, 4), low_mask);
-            let popcnt_lo = _mm256_shuffle_epi8(lookup, lo);
-            let popcnt_hi = _mm256_shuffle_epi8(lookup, hi);
-            let popcnt = _mm256_add_epi8(popcnt_lo, popcnt_hi);
+                // Popcount using nibble lookup
+                let lo = _mm256_and_si256(xor, low_mask);
+                let hi = _mm256_and_si256(_mm256_srli_epi16(xor, 4), low_mask);
+                let popcnt_lo = _mm256_shuffle_epi8(lookup, lo);
+                let popcnt_hi = _mm256_shuffle_epi8(lookup, hi);
+                let popcnt = _mm256_add_epi8(popcnt_lo, popcnt_hi);
 
-            // Sum bytes using SAD against zero
-            let sad = _mm256_sad_epu8(popcnt, _mm256_setzero_si256());
-            total = _mm256_add_epi64(total, sad);
+                // Sum bytes using SAD against zero
+                let sad = _mm256_sad_epu8(popcnt, _mm256_setzero_si256());
+                total = _mm256_add_epi64(total, sad);
+            }
+
+            // Horizontal sum
+            let mut lanes = [0u64; 4];
+            _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, total);
+            let simd_sum: u64 = lanes.iter().sum();
+
+            // Handle remainder
+            let mut remainder = 0u32;
+            for i in (chunks * 4)..VECTOR_WORDS {
+                remainder += (a_words[i] ^ b_words[i]).count_ones();
+            }
+
+            (simd_sum as u32) + remainder
         }
-
-        // Horizontal sum
-        let mut lanes = [0u64; 4];
-        _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, total);
-        let simd_sum: u64 = lanes.iter().sum();
-
-        // Handle remainder
-        let mut remainder = 0u32;
-        for i in (chunks * 4)..VECTOR_WORDS {
-            remainder += (a_words[i] ^ b_words[i]).count_ones();
-        }
-
-        (simd_sum as u32) + remainder
     }
 }
 
@@ -516,40 +520,42 @@ mod simd_arm {
     pub unsafe fn hamming_distance_neon(a: &BitpackedVector, b: &BitpackedVector) -> u32 {
         use std::arch::aarch64::*;
 
-        let a_words = a.words();
-        let b_words = b.words();
-        let mut total = vdupq_n_u64(0);
+        unsafe {
+            let a_words = a.words();
+            let b_words = b.words();
+            let mut total = vdupq_n_u64(0);
 
-        // Process 2 u64s at a time (128 bits)
-        let chunks = VECTOR_WORDS / 2;
-        for i in 0..chunks {
-            let offset = i * 2;
-            let va = vld1q_u64(a_words.as_ptr().add(offset));
-            let vb = vld1q_u64(b_words.as_ptr().add(offset));
-            let xor = veorq_u64(va, vb);
+            // Process 2 u64s at a time (128 bits)
+            let chunks = VECTOR_WORDS / 2;
+            for i in 0..chunks {
+                let offset = i * 2;
+                let va = vld1q_u64(a_words.as_ptr().add(offset));
+                let vb = vld1q_u64(b_words.as_ptr().add(offset));
+                let xor = veorq_u64(va, vb);
 
-            // Count bits using vcntq_u8
-            let bytes = vreinterpretq_u8_u64(xor);
-            let counts = vcntq_u8(bytes);
+                // Count bits using vcntq_u8
+                let bytes = vreinterpretq_u8_u64(xor);
+                let counts = vcntq_u8(bytes);
 
-            // Sum up through pairwise addition
-            let sum16 = vpaddlq_u8(counts);
-            let sum32 = vpaddlq_u16(sum16);
-            let sum64 = vpaddlq_u32(sum32);
+                // Sum up through pairwise addition
+                let sum16 = vpaddlq_u8(counts);
+                let sum32 = vpaddlq_u16(sum16);
+                let sum64 = vpaddlq_u32(sum32);
 
-            total = vaddq_u64(total, sum64);
+                total = vaddq_u64(total, sum64);
+            }
+
+            // Horizontal sum
+            let sum = vgetq_lane_u64(total, 0) + vgetq_lane_u64(total, 1);
+
+            // Handle remainder
+            let mut remainder = 0u32;
+            for i in (chunks * 2)..VECTOR_WORDS {
+                remainder += (a_words[i] ^ b_words[i]).count_ones();
+            }
+
+            (sum as u32) + remainder
         }
-
-        // Horizontal sum
-        let sum = vgetq_lane_u64(total, 0) + vgetq_lane_u64(total, 1);
-
-        // Handle remainder
-        let mut remainder = 0u32;
-        for i in (chunks * 2)..VECTOR_WORDS {
-            remainder += (a_words[i] ^ b_words[i]).count_ones();
-        }
-
-        (sum as u32) + remainder
     }
 }
 
