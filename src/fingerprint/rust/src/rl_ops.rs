@@ -292,9 +292,16 @@ pub enum SearchAction {
     BlockFilter,
 }
 
+/// Maximum Q-table entries to prevent unbounded growth.
+/// With 256 depths × top-3-blocks patterns × 6 actions, this caps at ~50K.
+const MAX_Q_TABLE_SIZE: usize = 50_000;
+
+/// Maximum episode reward history (ring buffer)
+const MAX_EPISODE_HISTORY: usize = 10_000;
+
 /// Q-learning policy for search routing decisions
 pub struct PolicyGradient {
-    /// Q-table: (state, action) → value
+    /// Q-table: (state, action) → value, bounded
     q_table: HashMap<(SearchState, SearchAction), f32>,
     /// Learning rate
     alpha: f32,
@@ -302,8 +309,8 @@ pub struct PolicyGradient {
     gamma: f32,
     /// Exploration rate (epsilon-greedy)
     epsilon: f32,
-    /// Episode rewards for tracking
-    episode_rewards: Vec<f32>,
+    /// Episode rewards for tracking (bounded ring buffer)
+    episode_rewards: std::collections::VecDeque<f32>,
     /// Action history for current episode
     current_episode: Vec<(SearchState, SearchAction)>,
 }
@@ -316,7 +323,7 @@ impl PolicyGradient {
             alpha: 0.1,
             gamma: 0.95,
             epsilon: 0.1,
-            episode_rewards: Vec::new(),
+            episode_rewards: std::collections::VecDeque::new(),
             current_episode: Vec::new(),
         }
     }
@@ -328,7 +335,7 @@ impl PolicyGradient {
             alpha,
             gamma,
             epsilon,
-            episode_rewards: Vec::new(),
+            episode_rewards: std::collections::VecDeque::new(),
             current_episode: Vec::new(),
         }
     }
@@ -388,7 +395,11 @@ impl PolicyGradient {
 
     /// End episode with reward, update Q-values via temporal difference
     pub fn end_episode(&mut self, final_reward: f32) {
-        self.episode_rewards.push(final_reward);
+        self.episode_rewards.push_back(final_reward);
+        // Cap episode history (ring buffer)
+        while self.episode_rewards.len() > MAX_EPISODE_HISTORY {
+            self.episode_rewards.pop_front();
+        }
 
         // Backward TD update through the episode
         let mut future_q = 0.0f32;
@@ -406,6 +417,18 @@ impl PolicyGradient {
         }
 
         self.current_episode.clear();
+
+        // Cap Q-table: evict entries with smallest absolute Q-values
+        if self.q_table.len() > MAX_Q_TABLE_SIZE {
+            let mut entries: Vec<_> = self.q_table.iter()
+                .map(|(k, &v)| (k.clone(), v.abs()))
+                .collect();
+            entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let evict_count = self.q_table.len() - MAX_Q_TABLE_SIZE + MAX_Q_TABLE_SIZE / 10;
+            for (key, _) in entries.iter().take(evict_count) {
+                self.q_table.remove(key);
+            }
+        }
     }
 
     /// Get average reward over recent episodes
@@ -413,9 +436,10 @@ impl PolicyGradient {
         if self.episode_rewards.is_empty() {
             return 0.0;
         }
-        let start = self.episode_rewards.len().saturating_sub(window);
-        let slice = &self.episode_rewards[start..];
-        slice.iter().sum::<f32>() / slice.len() as f32
+        let n = self.episode_rewards.len();
+        let start = n.saturating_sub(window);
+        let sum: f32 = self.episode_rewards.iter().skip(start).sum();
+        sum / (n - start) as f32
     }
 
     /// Decay exploration rate (anneal epsilon)
@@ -511,11 +535,15 @@ impl RewardTracker {
         nodes
     }
 
-    /// Decay all rewards (for non-stationarity)
+    /// Decay all rewards and prune dead entries (for non-stationarity)
     pub fn decay_all(&mut self, factor: f32) {
         for r in self.node_rewards.values_mut() {
             *r *= factor;
         }
+        // Prune near-zero entries to prevent unbounded growth
+        self.node_rewards.retain(|_, r| r.abs() > 0.001);
+        // Also prune visit counts for removed nodes
+        self.node_visits.retain(|k, _| self.node_rewards.contains_key(k));
     }
 }
 
@@ -759,10 +787,10 @@ pub struct Counterfactual {
 /// All encoded in BitpackedVector space: state⊕action is the causal binding,
 /// and Hamming distance measures causal proximity.
 pub struct CausalRlAgent {
-    /// Stored interventions (Rung 2)
-    interventions: Vec<Intervention>,
-    /// Stored counterfactuals (Rung 3)
-    counterfactuals: Vec<Counterfactual>,
+    /// Stored interventions (Rung 2), bounded FIFO
+    interventions: std::collections::VecDeque<Intervention>,
+    /// Stored counterfactuals (Rung 3), bounded FIFO
+    counterfactuals: std::collections::VecDeque<Counterfactual>,
     /// Q-value cache: hash(state⊕action) → estimated value
     q_cache: HashMap<u64, f32>,
     /// Discount factor
@@ -775,19 +803,25 @@ pub struct CausalRlAgent {
     visit_counts: HashMap<u64, u32>,
     /// Maximum stored interventions
     max_interventions: usize,
+    /// Maximum stored counterfactuals (prevents unbounded growth)
+    max_counterfactuals: usize,
+    /// Maximum Q-cache entries
+    max_q_cache: usize,
 }
 
 impl CausalRlAgent {
     pub fn new(gamma: f32, alpha: f32, epsilon: f32) -> Self {
         Self {
-            interventions: Vec::new(),
-            counterfactuals: Vec::new(),
+            interventions: std::collections::VecDeque::new(),
+            counterfactuals: std::collections::VecDeque::new(),
             q_cache: HashMap::new(),
             gamma,
             alpha,
             epsilon,
             visit_counts: HashMap::new(),
-            max_interventions: 10000,
+            max_interventions: 10_000,
+            max_counterfactuals: 5_000,
+            max_q_cache: 50_000,
         }
     }
 
@@ -818,11 +852,23 @@ impl CausalRlAgent {
 
         // Store intervention
         self.interventions
-            .push(Intervention::new(state, action, outcome, reward));
+            .push_back(Intervention::new(state, action, outcome, reward));
 
-        // Evict oldest if over capacity
-        if self.interventions.len() > self.max_interventions {
-            self.interventions.remove(0);
+        // Evict oldest if over capacity (O(1) with VecDeque)
+        while self.interventions.len() > self.max_interventions {
+            self.interventions.pop_front();
+        }
+
+        // Cap Q-cache to prevent unbounded growth
+        if self.q_cache.len() > self.max_q_cache {
+            // Evict ~10% of entries (those with lowest visit counts)
+            let evict_count = self.max_q_cache / 10;
+            let mut entries: Vec<_> = self.visit_counts.iter().map(|(&k, &v)| (k, v)).collect();
+            entries.sort_by_key(|&(_, v)| v);
+            for (key, _) in entries.iter().take(evict_count) {
+                self.q_cache.remove(key);
+                self.visit_counts.remove(key);
+            }
         }
     }
 
@@ -835,13 +881,18 @@ impl CausalRlAgent {
         alt_reward: f32,
         actual_reward: f32,
     ) {
-        self.counterfactuals.push(Counterfactual {
+        self.counterfactuals.push_back(Counterfactual {
             state,
             alt_action,
             alt_outcome,
             alt_reward,
             regret: actual_reward - alt_reward,
         });
+
+        // Evict oldest if over capacity (O(1) with VecDeque)
+        while self.counterfactuals.len() > self.max_counterfactuals {
+            self.counterfactuals.pop_front();
+        }
     }
 
     /// Causal Q-value: E[reward | state, do(action)]

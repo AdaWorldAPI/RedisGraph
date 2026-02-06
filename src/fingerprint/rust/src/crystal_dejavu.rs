@@ -172,6 +172,10 @@ impl ProjectionMatrix {
     }
 }
 
+/// Maximum entries kept per cell to prevent memory bloat.
+/// Beyond this, we keep only the bundled prototype and a count.
+const MAX_CELL_ENTRIES: usize = 128;
+
 /// Crystal cell containing bundled fingerprints
 #[derive(Clone, Debug)]
 pub struct CrystalCell {
@@ -179,9 +183,9 @@ pub struct CrystalCell {
     pub coord: Coord5D,
     /// Bundled fingerprint (majority of all entries)
     pub fingerprint: BitpackedVector,
-    /// Individual entry fingerprints
+    /// Ring buffer of recent entry fingerprints (capped at MAX_CELL_ENTRIES)
     entries: Vec<BitpackedVector>,
-    /// Entry count
+    /// Total entry count (including evicted)
     pub count: usize,
     /// Average qualia (emotional signature)
     pub qualia: [f32; 8],
@@ -203,10 +207,15 @@ impl CrystalCell {
 
     /// Add fingerprint to cell
     pub fn add(&mut self, fp: BitpackedVector, qualia: Option<[f32; 8]>) {
-        self.entries.push(fp);
         self.count += 1;
 
-        // Update bundled fingerprint via majority
+        // Evict oldest entry if at capacity (ring buffer behavior)
+        if self.entries.len() >= MAX_CELL_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push(fp);
+
+        // Update bundled fingerprint via majority of retained entries
         if self.entries.len() > 1 {
             let refs: Vec<&BitpackedVector> = self.entries.iter().collect();
             self.fingerprint = BitpackedVector::bundle(&refs);
@@ -230,14 +239,20 @@ impl CrystalCell {
     }
 }
 
+/// Maximum embedding cache entries to prevent unbounded memory growth.
+/// At 1024-dim embeddings × 4 bytes = 4KB per entry, 10K entries = ~40MB.
+const MAX_EMBEDDING_CACHE: usize = 10_000;
+
 /// Sentence Crystal: transforms text embeddings to fingerprints
 pub struct SentenceCrystal {
     /// Projection matrix
     projection: ProjectionMatrix,
     /// Crystal cells
     cells: HashMap<usize, CrystalCell>,
-    /// Embedding cache (for expensive transformer calls)
+    /// Embedding cache (for expensive transformer calls), bounded
     embedding_cache: HashMap<String, Vec<f32>>,
+    /// Insertion order for FIFO eviction of embedding_cache
+    cache_order: Vec<String>,
     /// Embedding dimension (default: 1024 for Jina v3)
     embedding_dim: usize,
 }
@@ -249,6 +264,7 @@ impl SentenceCrystal {
             projection: ProjectionMatrix::new(embedding_dim, 0xC4157A15EED00001),
             cells: HashMap::new(),
             embedding_cache: HashMap::new(),
+            cache_order: Vec::new(),
             embedding_dim,
         }
     }
@@ -260,7 +276,17 @@ impl SentenceCrystal {
 
     /// Store embedding with fingerprint
     pub fn store(&mut self, text: &str, embedding: Vec<f32>) -> Coord5D {
-        // Cache embedding
+        // Cache embedding with FIFO eviction
+        if !self.embedding_cache.contains_key(text) {
+            if self.embedding_cache.len() >= MAX_EMBEDDING_CACHE {
+                // Evict oldest
+                if let Some(oldest) = self.cache_order.first().cloned() {
+                    self.embedding_cache.remove(&oldest);
+                    self.cache_order.remove(0);
+                }
+            }
+            self.cache_order.push(text.to_string());
+        }
         self.embedding_cache.insert(text.to_string(), embedding.clone());
 
         // Project to crystal coordinate
@@ -284,6 +310,16 @@ impl SentenceCrystal {
         embedding: Vec<f32>,
         qualia: [f32; 8],
     ) -> Coord5D {
+        // Cache embedding with FIFO eviction
+        if !self.embedding_cache.contains_key(text) {
+            if self.embedding_cache.len() >= MAX_EMBEDDING_CACHE {
+                if let Some(oldest) = self.cache_order.first().cloned() {
+                    self.embedding_cache.remove(&oldest);
+                    self.cache_order.remove(0);
+                }
+            }
+            self.cache_order.push(text.to_string());
+        }
         self.embedding_cache.insert(text.to_string(), embedding.clone());
 
         let coord = self.projection.project(&embedding);
@@ -466,8 +502,9 @@ pub struct DejaVuRL {
     /// Q-values for (state, action) pairs
     /// State = sigma band, Action = accept/reject
     q_table: HashMap<(SigmaBand, bool), f32>,
-    /// Reward history
-    rewards: Vec<f32>,
+    /// Running reward average and count (replaces unbounded Vec<f32>)
+    reward_sum: f64,
+    reward_count: u64,
 }
 
 impl DejaVuRL {
@@ -478,7 +515,8 @@ impl DejaVuRL {
             learning_rate,
             gamma,
             q_table: HashMap::new(),
-            rewards: Vec::new(),
+            reward_sum: 0.0,
+            reward_count: 0,
         }
     }
 
@@ -544,7 +582,8 @@ impl DejaVuRL {
     /// Provide reward feedback for learning
     pub fn reward(&mut self, id: u64, was_correct: bool) {
         let reward = if was_correct { 1.0 } else { -1.0 };
-        self.rewards.push(reward);
+        self.reward_sum += reward as f64;
+        self.reward_count += 1;
 
         // Update Q-values based on which band this item was primarily in
         if let Some(obs) = self.observations.get(&id) {
@@ -600,11 +639,11 @@ impl DejaVuRL {
             strong_deja_vu_count: strong_count,
             average_strength: avg_strength,
             passes_completed: self.current_pass + 1,
-            total_rewards: self.rewards.len(),
-            average_reward: if self.rewards.is_empty() {
+            total_rewards: self.reward_count as usize,
+            average_reward: if self.reward_count == 0 {
                 0.0
             } else {
-                self.rewards.iter().sum::<f32>() / self.rewards.len() as f32
+                (self.reward_sum / self.reward_count as f64) as f32
             },
         }
     }
@@ -634,39 +673,58 @@ pub struct TruthMarker {
     pub truth: f32,
     /// Confidence in this truth value
     pub confidence: f32,
-    /// Evidence fingerprints (support)
-    pub evidence_for: Vec<BitpackedVector>,
-    /// Counter-evidence fingerprints
-    pub evidence_against: Vec<BitpackedVector>,
+    /// Count of supporting evidence (no need to store full vectors)
+    pub evidence_for_count: usize,
+    /// Count of counter-evidence
+    pub evidence_against_count: usize,
+    /// Bundled support fingerprint (majority of all support evidence)
+    pub support_bundle: BitpackedVector,
+    /// Bundled counter fingerprint (majority of all counter evidence)
+    pub counter_bundle: BitpackedVector,
 }
 
 impl TruthMarker {
     pub fn new(fingerprint: BitpackedVector) -> Self {
         Self {
-            fingerprint,
+            fingerprint: fingerprint.clone(),
             truth: 0.5, // Unknown
             confidence: 0.0,
-            evidence_for: Vec::new(),
-            evidence_against: Vec::new(),
+            evidence_for_count: 0,
+            evidence_against_count: 0,
+            support_bundle: BitpackedVector::zero(),
+            counter_bundle: BitpackedVector::zero(),
         }
     }
 
     /// Add supporting evidence
     pub fn add_support(&mut self, evidence: BitpackedVector) {
-        self.evidence_for.push(evidence);
+        self.evidence_for_count += 1;
+        // Incremental bundle: weighted merge with existing bundle
+        if self.evidence_for_count == 1 {
+            self.support_bundle = evidence;
+        } else {
+            let refs = vec![&self.support_bundle, &evidence];
+            self.support_bundle = BitpackedVector::bundle(&refs);
+        }
         self.update_truth();
     }
 
     /// Add counter-evidence
     pub fn add_counter(&mut self, evidence: BitpackedVector) {
-        self.evidence_against.push(evidence);
+        self.evidence_against_count += 1;
+        if self.evidence_against_count == 1 {
+            self.counter_bundle = evidence;
+        } else {
+            let refs = vec![&self.counter_bundle, &evidence];
+            self.counter_bundle = BitpackedVector::bundle(&refs);
+        }
         self.update_truth();
     }
 
     /// Update truth value based on evidence
     fn update_truth(&mut self) {
-        let support = self.evidence_for.len() as f32;
-        let counter = self.evidence_against.len() as f32;
+        let support = self.evidence_for_count as f32;
+        let counter = self.evidence_against_count as f32;
         let total = support + counter;
 
         if total > 0.0 {
@@ -776,7 +834,14 @@ impl SuperpositionCleaner {
     }
 
     /// Register known interference pattern
+    /// Maximum interference patterns to prevent O(n) per clean and unbounded growth
+    const MAX_INTERFERENCE: usize = 64;
+
     pub fn register_interference(&mut self, pattern: BitpackedVector) {
+        if self.interference_basis.basis.len() >= Self::MAX_INTERFERENCE {
+            // Evict oldest pattern
+            self.interference_basis.basis.remove(0);
+        }
         self.interference_basis.basis.push(pattern);
     }
 

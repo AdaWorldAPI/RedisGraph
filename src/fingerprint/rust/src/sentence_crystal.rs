@@ -91,13 +91,17 @@ pub struct SemanticCrystal {
 
 impl SemanticCrystal {
     /// Create new semantic crystal with default settings
+    ///
+    /// Cache is limited to 10K entries per cache (~13MB each at 1,256 bytes/entry).
+    /// Ngrams are deterministically computed from hash so eviction just means
+    /// recomputing on cache miss — no data loss.
     pub fn new() -> Self {
         Self {
             ngram_cache: HashMap::new(),
             word_cache: HashMap::new(),
             cell_prototypes: HashMap::new(),
             char_weight: 0.6, // 60% character ngrams, 40% word-level
-            max_cache: 100_000,
+            max_cache: 10_000, // 10K not 100K: ~13MB per cache, not ~130MB
         }
     }
 
@@ -168,9 +172,14 @@ impl SemanticCrystal {
                     cached.clone()
                 } else {
                     let fp = BitpackedVector::from_hash(ngram.as_bytes());
-                    if self.ngram_cache.len() < self.max_cache {
-                        self.ngram_cache.insert(ngram, fp.clone());
+                    // Evict random entry if at capacity
+                    if self.ngram_cache.len() >= self.max_cache {
+                        let evict_key = self.ngram_cache.keys().next().cloned();
+                        if let Some(k) = evict_key {
+                            self.ngram_cache.remove(&k);
+                        }
                     }
+                    self.ngram_cache.insert(ngram, fp.clone());
                     fp
                 };
 
@@ -206,9 +215,14 @@ impl SemanticCrystal {
                 cached.clone()
             } else {
                 let fp = BitpackedVector::from_hash(word.as_bytes());
-                if self.word_cache.len() < self.max_cache {
-                    self.word_cache.insert(word.to_string(), fp.clone());
+                // Evict random entry if at capacity
+                if self.word_cache.len() >= self.max_cache {
+                    let evict_key = self.word_cache.keys().next().cloned();
+                    if let Some(k) = evict_key {
+                        self.word_cache.remove(&k);
+                    }
                 }
+                self.word_cache.insert(word.to_string(), fp.clone());
                 fp
             };
 

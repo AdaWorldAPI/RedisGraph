@@ -510,7 +510,8 @@ impl HierarchicalNeuralTree {
 
             // Check if split needed
             if node.items.len() > self.config.max_leaf_size {
-                let items = node.items.clone();
+                // Move items out instead of cloning (~80KB savings per split)
+                let items = std::mem::take(&mut node.items);
                 let addr = node.addr.clone();
                 self.split_node(&addr, items);
             }
