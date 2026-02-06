@@ -72,7 +72,7 @@ impl SlotKeys {
 
         for (i, name) in slot_names.iter().enumerate() {
             // Use golden ratio multiplier for good distribution
-            let seed = 0xSLOT_KEY_BASE + (i as u64 * 0x9E3779B97F4A7C15);
+            let seed = 0x510714E7BA5E0000_u64.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15));
             slots.insert(name.to_string(), BitpackedVector::random(seed));
         }
 
@@ -396,8 +396,8 @@ impl NumericEncoder {
         let base = BitpackedVector::random(base_seed.wrapping_mul(0x9E3779B97F4A7C15));
 
         // Add "blur" from nearby values for soft boundaries
-        let blur1 = BitpackedVector::random((quantized - 1) as u64 * 0x9E3779B97F4A7C15);
-        let blur2 = BitpackedVector::random((quantized + 1) as u64 * 0x9E3779B97F4A7C15);
+        let blur1 = BitpackedVector::random(((quantized - 1) as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        let blur2 = BitpackedVector::random(((quantized + 1) as u64).wrapping_mul(0x9E3779B97F4A7C15));
 
         // Combine: base dominates, neighbors add similarity
         let refs = [&base, &base, &base, &blur1, &blur2];
@@ -478,7 +478,7 @@ impl NodeBuilder {
     /// Add boolean attribute
     pub fn with_bool(mut self, slot: &str, value: bool) -> Self {
         // True/False as distinct fingerprints
-        let seed = if value { 0xTRUE_SEED } else { 0xFALSE_SEED };
+        let seed = if value { 0x74AE5EED00000001 } else { 0xFA15E5EED0000000 };
         let fp = BitpackedVector::random(seed);
         self.attributes.push((slot.to_string(), fp));
         self

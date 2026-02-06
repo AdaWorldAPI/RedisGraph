@@ -469,7 +469,7 @@ pub fn hierarchical_fingerprint(dn: PackedDn) -> BitpackedVector {
 
         for bit in start_bit..end_bit {
             if zone_vec.get_bit(bit) {
-                fp.set_bit(bit);
+                fp.set_bit(bit, true);
             }
         }
     }
@@ -1068,7 +1068,7 @@ impl DnSemiring for HdrPathBind {
     }
 
     fn is_zero(&self, val: &BitpackedVector) -> bool {
-        val.count_ones() == 0
+        val.popcount() == 0
     }
 }
 
@@ -2904,7 +2904,7 @@ mod tests {
         // Each node should have a non-zero path fingerprint
         assert!(path_fps.contains_key(&b));
         let b_path_fp = &path_fps[&b];
-        assert!(b_path_fp.count_ones() > 0, "Path fingerprint should be non-zero");
+        assert!(b_path_fp.popcount() > 0, "Path fingerprint should be non-zero");
     }
 
     #[test]
@@ -3061,7 +3061,7 @@ mod tests {
         // Broad cascaded (radius = 5000, very permissive)
         let broad = {
             let semiring = CascadedResonanceMax::with_radius(
-                (*target).clone(),
+                target.clone(),
                 VECTOR_BITS as u32 / 2,
             );
             graph.semiring_traverse(a, 0u32, &semiring, 1)
@@ -3114,12 +3114,12 @@ mod tests {
 
         // Flip just 1 bit in word 0: exactly 1 differing word
         let mut c = BitpackedVector::zero();
-        c.set_bit(0);
+        c.set_bit(0, true);
         assert_eq!(count_differing_words(&a, &c), 1);
 
         // Flip 1 bit in the LAST word (bit 9999): exactly 1 differing word
         let mut d = BitpackedVector::zero();
-        d.set_bit(VECTOR_BITS - 1); // bit 9999
+        d.set_bit(VECTOR_BITS - 1, true); // bit 9999
         assert_eq!(count_differing_words(&a, &d), 1);
     }
 
@@ -3174,7 +3174,7 @@ mod tests {
         if let Some((star, cleaned_dist, noise_reduction)) = result {
             assert!(noise_reduction > 1.5);
             assert!(cleaned_dist > 0);
-            assert!(star.count_ones() > 0);
+            assert!(star.popcount() > 0);
         }
     }
 }

@@ -104,7 +104,7 @@ impl Coord5D {
 
     /// Convert to deterministic fingerprint
     pub fn to_fingerprint(&self) -> BitpackedVector {
-        let seed = self.to_index() as u64 * 0x9E3779B97F4A7C15;
+        let seed = (self.to_index() as u64).wrapping_mul(0x9E3779B97F4A7C15);
         BitpackedVector::random(seed)
     }
 }
@@ -246,7 +246,7 @@ impl SentenceCrystal {
     /// Create new crystal with given embedding dimension
     pub fn new(embedding_dim: usize) -> Self {
         Self {
-            projection: ProjectionMatrix::new(embedding_dim, 0xCRYSTAL_SEED),
+            projection: ProjectionMatrix::new(embedding_dim, 0xC4157A15EED00001),
             cells: HashMap::new(),
             embedding_cache: HashMap::new(),
             embedding_dim,
@@ -267,11 +267,11 @@ impl SentenceCrystal {
         let coord = self.projection.project(&embedding);
         let idx = coord.to_index();
 
+        // Create fingerprint from embedding (before mutable borrow of cells)
+        let fp = self.embedding_to_fingerprint(&embedding);
+
         // Create or update cell
         let cell = self.cells.entry(idx).or_insert_with(|| CrystalCell::new(coord));
-
-        // Create fingerprint from embedding
-        let fp = self.embedding_to_fingerprint(&embedding);
         cell.add(fp, None);
 
         coord
@@ -289,8 +289,8 @@ impl SentenceCrystal {
         let coord = self.projection.project(&embedding);
         let idx = coord.to_index();
 
-        let cell = self.cells.entry(idx).or_insert_with(|| CrystalCell::new(coord));
         let fp = self.embedding_to_fingerprint(&embedding);
+        let cell = self.cells.entry(idx).or_insert_with(|| CrystalCell::new(coord));
         cell.add(fp, Some(qualia));
 
         coord
@@ -1002,7 +1002,7 @@ mod tests {
             .map(|i| {
                 let mut fp = query.clone();
                 fp.flip_random_bits(i * 10, i as u64); // Varying distances
-                (i, fp)
+                (i as u64, fp)
             })
             .collect();
 

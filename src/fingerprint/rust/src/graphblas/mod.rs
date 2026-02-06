@@ -31,11 +31,12 @@
 //! | HAMMING_MIN | Hamming | Min | Shortest path |
 //! | BIND_RESONANCE | Bind | Best match | Query expansion |
 
-mod types;
+pub mod types;
 mod matrix;
 mod vector;
 mod semiring;
 mod ops;
+#[cfg(feature = "datafusion-storage")]
 mod sparse;
 mod descriptor;
 
@@ -44,6 +45,7 @@ pub use matrix::GrBMatrix;
 pub use vector::GrBVector;
 pub use semiring::{Semiring, HdrSemiring};
 pub use ops::*;
+#[cfg(feature = "datafusion-storage")]
 pub use sparse::{SparseFormat, CsrStorage, CooStorage};
 pub use descriptor::{Descriptor, GrBDesc};
 

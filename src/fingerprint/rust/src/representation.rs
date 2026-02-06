@@ -296,7 +296,7 @@ impl StackedBinary {
     /// Create random stacked vector
     pub fn random(num_planes: usize, seed: u64) -> Self {
         let planes = (0..num_planes)
-            .map(|i| BitpackedVector::random(seed.wrapping_add(i as u64 * 0x9E3779B97F4A7C15)))
+            .map(|i| BitpackedVector::random(seed.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))))
             .collect();
         Self { planes }
     }

@@ -47,9 +47,11 @@ pub mod bitpack;
 pub mod hamming;
 pub mod resonance;
 pub mod hdr_cascade;
+#[cfg(feature = "datafusion-storage")]
 pub mod graphblas;
 pub mod representation;
 pub mod dntree;
+#[cfg(feature = "datafusion-storage")]
 pub mod mindmap;
 pub mod nntree;
 pub mod epiphany;
@@ -57,6 +59,9 @@ pub mod crystal_dejavu;
 pub mod slot_encoding;
 pub mod storage_transport;
 pub mod dn_sparse;
+pub mod neural_tree;
+pub mod rl_ops;
+pub mod sentence_crystal;
 pub mod navigator;
 #[cfg(feature = "datafusion-storage")]
 pub mod storage;
@@ -75,9 +80,11 @@ pub use bitpack::{
 pub use hamming::{HammingEngine, StackedPopcount, hamming_distance_ref};
 pub use resonance::{VectorField, Resonator, BoundEdge};
 pub use hdr_cascade::{HdrCascade, MexicanHat, SearchResult};
+#[cfg(feature = "datafusion-storage")]
 pub use graphblas::{GrBMatrix, GrBVector, HdrSemiring, Semiring};
 pub use representation::{GradedVector, StackedBinary, SparseHdr};
 pub use dntree::{TreeAddr, DnTree, DnNode, DnEdge, CogVerb, VerbCategory};
+#[cfg(feature = "datafusion-storage")]
 pub use mindmap::{GrBMindmap, MindmapBuilder, MindmapNode, NodeType};
 pub use nntree::{NnTree, NnTreeConfig, SparseNnTree};
 pub use epiphany::{EpiphanyEngine, EpiphanyZone, CentroidStats, ResonanceCalibrator};
@@ -92,6 +99,19 @@ pub use dn_sparse::{
     NodeSlot, EdgeDescriptor, hierarchical_fingerprint, xor_bind_fingerprint,
     DnSemiring, BooleanBfs, HdrPathBind, HammingMinPlus, PageRankSemiring, ResonanceMax,
     CascadedHammingMinPlus, CascadedResonanceMax,
+};
+pub use neural_tree::{
+    HierarchicalNeuralTree, NeuralTreeNode, NeuralTreeConfig, NeuralProfile,
+    NeuralSearchResult, NeuralTreeStats, CrystalAttention, NeuralLayer, NeuralBlock,
+    NUM_BLOCKS, WORDS_PER_BLOCK, BITS_PER_BLOCK,
+};
+pub use rl_ops::{
+    RewardSignal, HebbianMatrix, PolicyGradient, RewardTracker, RlEngine, RlStats,
+    SearchState, SearchAction, Intervention, Counterfactual, CausalRlAgent, CausalChainLink,
+    StdpRule, PlasticityEngine,
+};
+pub use sentence_crystal::{
+    SemanticCrystal, SemanticEncoding, LearningCell, LearningCrystal,
 };
 pub use navigator::{Navigator, NavResult, CypherArg, CypherYield};
 #[cfg(feature = "datafusion-storage")]
