@@ -9,7 +9,8 @@
 - `navigator.rs` (Cypher + DN addressing + GNN + GraphBLAS)
 - `width_16k/demo.rs` (integration tests)
 
-**Test results**: 239 pass, 10 pre-existing failures (none in new code)
+**Test results**: 259 pass, 10 pre-existing failures (none in new code)
+**Updated**: 2026-02-06 (hardening fixes applied, 22 new tests added)
 
 ---
 
@@ -60,40 +61,36 @@
 
 ## Production Concerns (Ordered by Severity)
 
-### 1. Unbounded Allocations in Hot Paths (MEDIUM)
+### 1. Unbounded Allocations in Hot Paths (MEDIUM) — PARTIALLY FIXED
 
-| Location | Issue |
-|----------|-------|
-| `migrate_batch()` | Allocates `Vec<[u64; 256]>` — each element is 2KB on stack before moving to heap. For 1M vectors: 2GB allocation. |
-| `search()` in `search.rs` | Collects all passing candidates into `Vec` before sorting. Should use a bounded max-heap. |
-| `graphblas_spmv()` | `output: Vec<Vec<BitpackedVector>>` — inner Vecs are unbounded per row. Fan-in of 10K edges to one node = 10K × 1.25KB. |
-| `DeltaChain::from_path()` | No depth limit. A degenerate path of depth 1000 creates 1000 XorDelta objects. |
+| Location | Issue | Status |
+|----------|-------|--------|
+| `migrate_batch()` | Allocates `Vec<[u64; 256]>` — each element is 2KB on stack before moving to heap. For 1M vectors: 2GB allocation. | **Open** — streaming iterator variant still needed |
+| `search()` in `search.rs` | Collects all passing candidates into `Vec` before sorting. Should use a bounded max-heap. | **Mitigated** — search uses insert+truncate at k, which is O(n·k) but bounded. For k≤100 this is fine. |
+| `graphblas_spmv()` | `output: Vec<Vec<BitpackedVector>>` — inner Vecs are unbounded per row. Fan-in of 10K edges to one node = 10K × 1.25KB. | **Open** — needs max_fan_in config |
+| `DeltaChain::from_path()` | No depth limit. A degenerate path of depth 1000 creates 1000 XorDelta objects. | **FIXED** — `MAX_CHAIN_DEPTH = 256` cap applied |
 
-**Recommendation**: Add capacity hints, use `BinaryHeap` for top-k, add configurable depth/size limits.
+**Applied fix**: `DeltaChain::from_path()` now caps at `MAX_CHAIN_DEPTH` (256). Tested.
 
-### 2. Thread Safety of XorWriteCache (MEDIUM)
+### 2. Thread Safety of XorWriteCache (MEDIUM) — FIXED
 
-`XorWriteCache` uses `HashMap` with `&mut self` methods. In a concurrent server:
-- Multiple queries reading through the cache concurrently is fine (immutable borrows).
-- But `record_delta` and `flush` require exclusive access.
-- There's no built-in locking — the caller must synchronize.
+~~`XorWriteCache` uses `HashMap` with `&mut self` methods. In a concurrent server:~~
+~~- Multiple queries reading through the cache concurrently is fine (immutable borrows).~~
+~~- But `record_delta` and `flush` require exclusive access.~~
+~~- There's no built-in locking — the caller must synchronize.~~
 
-**Recommendation**: Either wrap in `RwLock<XorWriteCache>` or document that the caller must synchronize. Consider `DashMap` for lock-free reads.
+**FIXED**: Added `ConcurrentWriteCache` wrapper with `RwLock<XorWriteCache>`.
+- `read_through()` takes read lock (concurrent with other reads)
+- `record_delta()` and `flush()` take write lock (exclusive)
+- Uses `ConcurrentCacheRead` enum (fully owned, no lifetime entanglement with guard)
+- Tested with 3 unit tests + integration demo scenario
 
-### 3. Probabilistic RNG Quality in XorBubble (LOW)
+### 3. Probabilistic RNG Quality in XorBubble (LOW) — FIXED
 
-The `probabilistic_mask()` uses a simple xorshift64 RNG:
-```rust
-*rng ^= *rng << 13;
-*rng ^= *rng >> 7;
-*rng ^= *rng << 17;
-```
+~~The `probabilistic_mask()` uses a simple xorshift64 RNG:~~
+~~Seed of 0 produces all-zero output forever (degenerate case).~~
 
-This is adequate for attenuation (statistical properties don't need crypto-grade randomness), but:
-- Seed of 0 produces all-zero output forever (degenerate case).
-- Period is 2^64 - 1 which is fine.
-
-**Recommendation**: Add a check: `if seed == 0 { seed = 1; }` or document that seed must be nonzero.
+**FIXED**: Added `if rng == 0 { rng = 1; }` guard in both `apply_to_parent()` and `probabilistic_mask()`. Tested with seed=0 scenario.
 
 ### 4. Schema Block Overlap with Semantic Content (LOW)
 
@@ -140,9 +137,9 @@ Actually, the current code does check: `match args.get(1)` with safe `Option` ac
 ### Must-Have Before Production
 
 1. **Wire DN GET/SET to actual tree storage** — Replace stubs with `HierarchicalNeuralTree` or `DnTree` lookups.
-2. **Add `RwLock` to `XorWriteCache`** — Or document threading requirements explicitly.
-3. **Bounded search results** — Replace `Vec::push` + sort in `search()` with `BinaryHeap<Reverse<>>` of capacity k.
-4. **Schema versioning** — Add a version byte in the schema sidecar so future layout changes don't corrupt existing data.
+2. ~~**Add `RwLock` to `XorWriteCache`**~~ — **DONE**: `ConcurrentWriteCache` added with RwLock.
+3. **Bounded search results** — Current insert+truncate is O(n·k) but bounded at k. Acceptable for k≤100. For larger k, consider `BinaryHeap`.
+4. ~~**Schema versioning**~~ — **DONE**: Version byte at word[223] bits 56-63. Version 0=legacy, 1=current.
 
 ### Nice-to-Have
 
@@ -156,24 +153,39 @@ Actually, the current code does check: `match args.get(1)` with safe `Option` ac
 
 | Module | Tests | Coverage Assessment |
 |--------|-------|-------------------|
-| `schema.rs` | 11 | All pack/unpack roundtrips, truth functions, bloom filter |
-| `search.rs` | 17 | Predicates, masked distance, threshold, pipeline, bind, bloom, RL |
+| `schema.rs` | 14 (+3) | All pack/unpack roundtrips, truth functions, bloom filter, **schema versioning byte, backward compat, word isolation** |
+| `search.rs` | 24 (+7) | Predicates, masked distance, threshold, pipeline, bind, bloom, RL, **bloom-accelerated search, RL-guided search, federated schema merge** |
 | `compat.rs` | 9 | Zero-extend, truncate, fold, cross-distance, batch migration |
-| `xor_bubble.rs` | 16 | Delta roundtrip, chain, bubble exact/attenuated/exhaustion, write cache CRUD + self-inverse |
-| `navigator.rs` | 22 | Bind/unbind, analogy, GNN, GraphBLAS, Cypher procs, DN addressing |
-| `demo.rs` | 10 | Full integration scenarios exercising all modules together |
-| **Total new** | **85** | |
+| `xor_bubble.rs` | 23 (+7) | Delta roundtrip, chain, bubble exact/attenuated/exhaustion, write cache CRUD + self-inverse, **depth cap, RNG seed=0, ConcurrentWriteCache basic/flush/compose** |
+| `navigator.rs` | 24 (+2) | Bind/unbind, analogy, GNN, GraphBLAS, Cypher procs, DN addressing, **Cypher schemaMerge, Cypher schemaVersion** |
+| `demo.rs` | 13 (+3) | Full integration scenarios, **bloom+RL search demo, federated merge demo, hardening features demo** |
+| **Total new** | **107** (+22) | |
 
-All 85 new tests pass. Zero warnings in new code. The 10 pre-existing failures are in older modules (`crystal_dejavu`, `dn_sparse`, `epiphany`, `slot_encoding`, `storage_transport`) and are unrelated to this work.
+All 107 new tests pass (259 total pass, 10 pre-existing failures unchanged). The 10 pre-existing failures are in older modules (`crystal_dejavu`, `dn_sparse`, `epiphany`, `slot_encoding`, `storage_transport`) and are unrelated to this work.
 
 ---
 
 ## Bottom Line
 
-The code is **architecturally sound and algorithmically correct**. The core operations (XOR bind, schema pack/unpack, delta compression, NARS truth functions, bloom filters) are production-ready with good test coverage. The main gaps are:
+The code is **architecturally sound and algorithmically correct**. The core operations (XOR bind, schema pack/unpack, delta compression, NARS truth functions, bloom filters) are production-ready with good test coverage.
+
+### Fixes Applied This Session
+
+| Fix | Status |
+|-----|--------|
+| Schema versioning byte (word 223, bits 56-63) | **DONE** — v0=legacy, v1=current |
+| `ConcurrentWriteCache` with RwLock | **DONE** — read/write lock separation |
+| RNG seed=0 guard in `probabilistic_mask` + `apply_to_parent` | **DONE** |
+| `DeltaChain` depth cap (`MAX_CHAIN_DEPTH = 256`) | **DONE** |
+| Bloom-accelerated search | **DONE** — `bloom_accelerated_search()` with neighbor bonus |
+| RL-guided search | **DONE** — `rl_guided_search()` with composite scoring |
+| Federated schema merge | **DONE** — `schema_merge()` with evidence-combining rules |
+| Cypher `hdr.schemaMerge` + `hdr.schemaVersion` procedures | **DONE** |
+
+### Remaining Gaps
 
 1. **Storage integration stubs** — DN GET/SET/SCAN and schema search need backing store wiring.
-2. **Concurrency** — XorWriteCache needs synchronization for multi-threaded use.
-3. **Bounded allocations** — Search and batch migration need caps for production traffic.
+2. **Unbounded batch migration** — `migrate_batch` still allocates full output Vec.
+3. **GraphBLAS fan-in cap** — `graphblas_spmv` inner Vecs still unbounded per row.
 
 None of these are fundamental design flaws. They're integration work that follows naturally from the current clean module boundaries.

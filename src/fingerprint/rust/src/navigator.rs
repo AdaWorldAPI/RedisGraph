@@ -588,6 +588,30 @@ impl Navigator {
                 ])
             }
 
+            // Schema merge: combine two representations from federated instances
+            // CALL hdr.schemaMerge($primary, $secondary) YIELD result
+            "hdr.schemaMerge" | "hdr.schema_merge" => {
+                let (a, b) = Self::extract_two_vectors(args)?;
+                let a16 = self.extend_to_16k(&a);
+                let b16 = self.extend_to_16k(&b);
+
+                let merged = crate::width_16k::search::schema_merge(&a16, &b16);
+                let result = crate::width_16k::compat::truncate_slice(&merged)
+                    .unwrap_or_else(|| a.clone());
+
+                Ok(vec![CypherYield::Vector("result".into(), result)])
+            }
+
+            // Read schema version from a 16K vector
+            // CALL hdr.schemaVersion($vec) YIELD version
+            "hdr.schemaVersion" | "hdr.schema_version" => {
+                let v = Self::extract_one_vector(args)?;
+                let w16 = self.extend_to_16k(&v);
+                let version = crate::width_16k::schema::SchemaSidecar::read_version(&w16);
+
+                Ok(vec![CypherYield::Int("version".into(), version as i64)])
+            }
+
             _ => Err(HdrError::Query(format!("Unknown procedure: {}", procedure))),
         }
     }
@@ -1690,5 +1714,45 @@ mod tests {
             "graphs:semantic:3:8:1",
         ]).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    // =====================================================================
+    // NEW CYPHER PROCEDURES: Schema merge + version
+    // =====================================================================
+
+    #[test]
+    fn test_cypher_schema_merge() {
+        let nav = Navigator::new();
+        let a = BitpackedVector::random(1);
+        let b = BitpackedVector::random(2);
+
+        let yields = nav.cypher_call("hdr.schemaMerge", &[
+            CypherArg::Vector(a),
+            CypherArg::Vector(b),
+        ]).unwrap();
+
+        assert_eq!(yields.len(), 1);
+        if let CypherYield::Vector(name, _v) = &yields[0] {
+            assert_eq!(name, "result");
+        } else {
+            panic!("Expected vector yield");
+        }
+    }
+
+    #[test]
+    fn test_cypher_schema_version() {
+        let nav = Navigator::new();
+        let v = BitpackedVector::random(42);
+
+        let yields = nav.cypher_call("hdr.schemaVersion", &[
+            CypherArg::Vector(v),
+        ]).unwrap();
+
+        assert_eq!(yields.len(), 1);
+        if let CypherYield::Int(name, _ver) = &yields[0] {
+            assert_eq!(name, "version");
+        } else {
+            panic!("Expected int yield");
+        }
     }
 }

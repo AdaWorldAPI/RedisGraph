@@ -860,4 +860,197 @@ mod tests {
         assert_eq!(recovered.metrics.in_degree, 7);
         assert_eq!(recovered.metrics.out_degree, 8);
     }
+
+    // =====================================================================
+    // SCENARIO 11: Bloom-Accelerated + RL-Guided Search
+    //
+    // Demonstrates the new search modes that leverage inline metadata
+    // for smarter candidate ranking beyond pure Hamming distance.
+    // =====================================================================
+
+    #[test]
+    fn demo_bloom_rl_search() {
+        // Build a small dataset
+        let mut candidates: Vec<Vec<u64>> = Vec::new();
+        let source_id = 9999u64;
+
+        for i in 0..20 {
+            let v = crate::bitpack::BitpackedVector::random(i as u64);
+            let mut words = compat::zero_extend(&v).to_vec();
+
+            let mut schema = SchemaSidecar::default();
+            schema.ani_levels.planning = 500;
+            schema.q_values.set_q(0, (i as f32 - 10.0) / 10.0); // Q from -1 to +0.9
+
+            // Some candidates are known neighbors of source
+            if i % 3 == 0 {
+                schema.neighbors.insert(source_id);
+            }
+
+            schema.write_to_words(&mut words);
+            candidates.push(words);
+        }
+
+        let query_v = crate::bitpack::BitpackedVector::random(42);
+        let query_words = compat::zero_extend(&query_v).to_vec();
+        let refs: Vec<&[u64]> = candidates.iter().map(|c| c.as_slice()).collect();
+
+        let schema_query = SchemaQuery::new()
+            .with_ani(AniFilter { min_level: 3, min_activation: 100 });
+
+        // ----- Bloom-accelerated search -----
+        let bloom_results = bloom_accelerated_search(
+            &refs, &query_words, source_id, 5, 0.3, &schema_query,
+        );
+        assert!(!bloom_results.is_empty(), "Should find some results");
+        assert!(bloom_results.len() <= 5, "Should respect k limit");
+
+        // Check that bloom neighbors get a bonus
+        for r in &bloom_results {
+            if r.is_bloom_neighbor {
+                assert!(r.effective_distance <= r.raw_distance,
+                    "Bloom neighbors should have bonus: eff={} raw={}", r.effective_distance, r.raw_distance);
+            }
+        }
+
+        // ----- RL-guided search -----
+        let rl_results = rl_guided_search(
+            &refs, &query_words, 5, 0.3, &schema_query,
+        );
+        assert!(!rl_results.is_empty(), "Should find RL results");
+        assert!(rl_results.len() <= 5);
+
+        // Results should be sorted by composite score
+        for w in rl_results.windows(2) {
+            assert!(w[0].composite_score <= w[1].composite_score,
+                "Results should be sorted by composite score");
+        }
+    }
+
+    // =====================================================================
+    // SCENARIO 12: Federated Schema Merge
+    //
+    // Demonstrates combining schema metadata from two independent
+    // instances that hold different evidence about the same entity.
+    // =====================================================================
+
+    #[test]
+    fn demo_federated_merge() {
+        let base_vec = crate::bitpack::BitpackedVector::random(42);
+        let mut instance_a = compat::zero_extend(&base_vec).to_vec();
+        let mut instance_b = compat::zero_extend(&base_vec).to_vec();
+
+        // Instance A: observed high social reasoning, has trust evidence
+        let mut schema_a = SchemaSidecar::default();
+        schema_a.ani_levels.social = 700;
+        schema_a.ani_levels.planning = 200;
+        schema_a.nars_truth = NarsTruth::from_floats(0.9, 0.6);
+        schema_a.metrics.pagerank = 500;
+        schema_a.metrics.hop_to_root = 5;
+        schema_a.metrics.degree = 3;
+        schema_a.neighbors.insert(100);
+        schema_a.neighbors.insert(200);
+        schema_a.q_values.set_q(0, 0.7);
+        schema_a.write_to_words(&mut instance_a);
+
+        // Instance B: observed high planning, different trust evidence
+        let mut schema_b = SchemaSidecar::default();
+        schema_b.ani_levels.social = 300;
+        schema_b.ani_levels.planning = 600;
+        schema_b.nars_truth = NarsTruth::from_floats(0.7, 0.4);
+        schema_b.metrics.pagerank = 800;
+        schema_b.metrics.hop_to_root = 2;
+        schema_b.metrics.degree = 8;
+        schema_b.neighbors.insert(300);
+        schema_b.neighbors.insert(400);
+        schema_b.q_values.set_q(0, 0.3);
+        schema_b.write_to_words(&mut instance_b);
+
+        // Merge: A is primary (authoritative source)
+        let merged = schema_merge(&instance_a, &instance_b);
+        let ms = SchemaSidecar::read_from_words(&merged);
+
+        // ANI: element-wise max
+        assert_eq!(ms.ani_levels.social, 700, "Social should be max(700,300)=700");
+        assert_eq!(ms.ani_levels.planning, 600, "Planning should be max(200,600)=600");
+
+        // NARS: revision combines evidence → confidence should be reasonable
+        assert!(ms.nars_truth.f() > 0.0, "Merged frequency should be positive");
+
+        // Metrics: max pagerank, min hop, max degree
+        assert_eq!(ms.metrics.pagerank, 800, "Pagerank: max(500,800)=800");
+        assert_eq!(ms.metrics.hop_to_root, 2, "Hop: min(5,2)=2");
+        assert_eq!(ms.metrics.degree, 8, "Degree: max(3,8)=8");
+
+        // Bloom: union of neighbors from both instances
+        assert!(bloom_might_be_neighbors(&merged, 100), "Should know neighbor 100 from A");
+        assert!(bloom_might_be_neighbors(&merged, 300), "Should know neighbor 300 from B");
+
+        // Semantic content preserved from primary (A)
+        let truncated_a = compat::truncate_slice(&instance_a).unwrap();
+        let truncated_merged = compat::truncate_slice(&merged).unwrap();
+        assert_eq!(truncated_a, truncated_merged,
+            "Semantic content should be preserved from primary");
+    }
+
+    // =====================================================================
+    // SCENARIO 13: Schema Versioning + ConcurrentWriteCache
+    //
+    // Tests the hardening features: version byte in schema, and
+    // thread-safe write cache.
+    // =====================================================================
+
+    #[test]
+    fn demo_hardening_features() {
+        // ----- Schema versioning -----
+        let mut words = vec![0u64; VECTOR_WORDS];
+
+        // Before writing, version is 0 (legacy)
+        assert_eq!(SchemaSidecar::read_version(&words), 0);
+
+        // Write schema → version becomes 1
+        let mut schema = SchemaSidecar::default();
+        schema.ani_levels.planning = 999;
+        schema.nars_truth = NarsTruth::from_floats(0.9, 0.8);
+        schema.write_to_words(&mut words);
+        assert_eq!(SchemaSidecar::read_version(&words), 1);
+
+        // Version byte doesn't corrupt ANI
+        let recovered = SchemaSidecar::read_from_words(&words);
+        assert_eq!(recovered.ani_levels.planning, 999);
+        assert!((recovered.nars_truth.f() - 0.9).abs() < 0.01);
+
+        // ----- ConcurrentWriteCache -----
+        let cache = ConcurrentWriteCache::default_cache();
+        let base = words.clone();
+
+        // Clean read
+        let read = cache.read_through(1, &base);
+        assert!(read.is_clean());
+
+        // Record a delta
+        let mut modified = base.clone();
+        modified[0] ^= 0xDEAD;
+        let delta = XorDelta::compute(&base, &modified);
+        cache.record_delta(1, delta);
+
+        // Dirty read shows patched data
+        let read = cache.read_through(1, &base);
+        assert!(!read.is_clean());
+        let patched = read.patched_words().unwrap();
+        assert_eq!(patched[0], modified[0]);
+
+        // Schema still readable from patched words (schema region unchanged)
+        let patched_schema = SchemaSidecar::read_from_words(patched);
+        assert_eq!(patched_schema.ani_levels.planning, 999);
+
+        // ----- DeltaChain depth limit -----
+        assert_eq!(MAX_CHAIN_DEPTH, 256);
+
+        // Flush
+        assert_eq!(cache.dirty_count(), 1);
+        let flushed = cache.flush();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(cache.dirty_count(), 0);
+    }
 }
